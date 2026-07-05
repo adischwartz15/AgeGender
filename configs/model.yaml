@@ -1,0 +1,51 @@
+# Model architecture configuration.
+# The backbone is a manually implemented ResNet-18 (see src/models/custom_resnet.py).
+# No prebuilt architectures, model hubs, or downloaded ImageNet weights are used.
+
+model:
+  architecture: shared_adapters   # separate | shared_no_adapters | shared_adapters
+  backbone:
+    block_layout: [2, 2, 2, 2]    # ResNet-18 layout
+    in_channels: 3
+    stem_channels: 64
+    embedding_dim: 512
+    zero_init_residual: true
+
+  pretrained_checkpoint: null      # path to a checkpoint produced by this repo, or null
+
+  adapters:
+    enabled: true
+    bottleneck_dim: 128
+    dropout: 0.1
+
+  age_head:
+    hidden_dim: 128
+    dropout: 0.1
+    age_min: 0
+    age_max: 120
+
+  gender_head:
+    hidden_dim: 128
+    dropout: 0.1
+    num_classes: 2
+    class_names: ["gender_label_0", "gender_label_1"]
+    confidence_threshold: 0.80
+    class_weights: null           # optional list, e.g. [1.0, 1.2]
+
+  loss_balancing:
+    mode: fixed                   # fixed | learned_uncertainty
+    fixed:
+      age_weight: 1.0
+      gender_weight: 1.0
+    learned_uncertainty:
+      init_log_var_age: 0.0
+      init_log_var_gender: 0.0
+
+gradcam:
+  target_layer: layer4            # last residual stage of the backbone
+
+knn:
+  k: 15
+  distance_weighted: true
+  metric: euclidean
+  index_dir: ./outputs/knn

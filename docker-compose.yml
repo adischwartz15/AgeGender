@@ -1,0 +1,28 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: face-multitask-research-api:local
+    ports:
+      - "8000:8000"
+    environment:
+      - GENDER_LABEL_0=${GENDER_LABEL_0:-gender_label_0}
+      - GENDER_LABEL_1=${GENDER_LABEL_1:-gender_label_1}
+      - GENDER_CONFIDENCE_THRESHOLD=${GENDER_CONFIDENCE_THRESHOLD:-0.80}
+    volumes:
+      - ./checkpoints:/app/checkpoints:ro
+      - ./outputs:/app/outputs:ro
+      - ./data/splits:/app/data/splits:ro
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: face-multitask-research-frontend:local
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+    restart: unless-stopped

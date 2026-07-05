@@ -1,0 +1,109 @@
+#!/usr/bin/env python
+"""CLI: generate Grad-CAM "model attention visualization" overlays for sample images.
+
+Produces overlays for correct predictions, incorrect predictions,
+low-confidence examples, and (if present) blurry / partial /
+robustness-corrupted images, saved to outputs/gradcam/.
+
+Usage:
+    python scripts/generate_gradcam.py --checkpoint checkpoints/multitask_best_balanced_score.pt
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+import pandas as pd
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.data.transforms import EvalTransform
+from src.evaluation.gradcam import GradCAM, resize_heatmap
+from src.evaluation.robustness import apply_corruption
+from src.inference.artifacts import load_model_checkpoint
+from src.inference.quality import compute_quality_diagnostics
+from src.utils.config import REPO_ROOT
+from src.utils.logging import get_logger
+from src.utils.visualization import save_gradcam_overlay
+
+logger = get_logger("scripts.generate_gradcam")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--num-samples", type=int, default=12)
+    args = parser.parse_args()
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, config, _ = load_model_checkpoint(args.checkpoint, device)
+
+    splits_path = REPO_ROOT / config["paths"]["splits_dir"] / "full_metadata_with_splits.csv"
+    if not splits_path.exists():
+        logger.error("No prepared split found at %s.", splits_path)
+        return 1
+    df = pd.read_csv(splits_path)
+    test_df = df[df["split"] == "test"].dropna(subset=["gender_label"]).head(args.num_samples)
+
+    transform = EvalTransform(config["dataset"]["image_size"])
+    gradcam = GradCAM(model, config["gradcam"]["target_layer"])
+    confidence_threshold = config["model"]["gender_head"].get("confidence_threshold", 0.80)
+    class_names = config["model"]["gender_head"]["class_names"]
+
+    output_dir = REPO_ROOT / "outputs" / "gradcam"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    from PIL import Image
+
+    for i, row in enumerate(test_df.to_dict("records")):
+        with Image.open(row["image_path"]) as img:
+            rgb = img.convert("RGB")
+            image_tensor = transform(rgb).unsqueeze(0).to(device)
+
+            with torch.no_grad():
+                outputs = model(image_tensor)
+                probs = torch.softmax(outputs["gender_logits"], dim=-1)[0].cpu().numpy()
+            predicted = int(probs.argmax())
+            confidence = float(probs.max())
+            true_label = int(row["gender_label"]) if row["gender_label"] == row["gender_label"] else None
+            correct = true_label is not None and predicted == true_label
+            category = "low_confidence" if confidence < confidence_threshold else ("correct" if correct else "incorrect")
+
+            age_result = gradcam.generate(image_tensor.clone(), task="age")
+            gender_result = gradcam.generate(image_tensor.clone(), task="gender")
+
+            image_np = __import__("numpy").asarray(rgb.resize((config["dataset"]["image_size"],) * 2))
+            age_heatmap = resize_heatmap(age_result["heatmap"], image_np.shape[:2][::-1])
+            gender_heatmap = resize_heatmap(gender_result["heatmap"], image_np.shape[:2][::-1])
+
+            save_gradcam_overlay(
+                image_np / 255.0, age_heatmap, output_dir / f"{category}_{i}_age_attention.png",
+                "Model attention visualization: age (q50)",
+            )
+            save_gradcam_overlay(
+                image_np / 255.0, gender_heatmap, output_dir / f"{category}_{i}_gender_attention.png",
+                f"Model attention visualization: gender-label ({class_names[predicted]})",
+            )
+
+            quality = compute_quality_diagnostics(rgb, "jpg", Path(row["image_path"]).stat().st_size)
+            if quality.warnings and i < 3:
+                blurred = apply_corruption(rgb, "gaussian_blur", 2.0, seed=i)
+                blurred_tensor = transform(blurred).unsqueeze(0).to(device)
+                blurred_result = gradcam.generate(blurred_tensor, task="age")
+                blurred_heatmap = resize_heatmap(blurred_result["heatmap"], image_np.shape[:2][::-1])
+                save_gradcam_overlay(
+                    __import__("numpy").asarray(blurred.resize((config["dataset"]["image_size"],) * 2)) / 255.0,
+                    blurred_heatmap, output_dir / f"blurry_{i}_age_attention.png",
+                    "Model attention visualization: age (blurred input)",
+                )
+
+    logger.info("Saved Grad-CAM overlays to %s", output_dir)
+    print(f"Saved Grad-CAM overlays to {output_dir}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

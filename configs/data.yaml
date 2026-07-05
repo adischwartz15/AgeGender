@@ -1,0 +1,52 @@
+# Dataset configuration. Two adapters are supported:
+#   - "utkface": parses the UTKFace filename convention age_gender_race_date.jpg
+#   - "csv": generic adapter for Kaggle datasets that ship a metadata CSV
+#
+# Only "age" and "gender_label" are ever used as supervision targets.
+# Race/ethnicity metadata, if present, is carried purely for documentation
+# and is never used as a feature, target, or split criterion.
+
+dataset:
+  source: utkface              # utkface | csv
+  image_root: ./data/raw
+  image_size: 128
+  channels: 3
+
+  utkface:
+    glob_pattern: "**/*.jpg"
+
+  csv:
+    metadata_csv: ./data/raw/metadata.csv
+    image_path_column: image_path
+    age_column: age
+    gender_label_column: gender_label
+    split_column: null          # optional pre-existing split column
+    subject_id_column: null     # optional subject id for subject-level splitting
+    label_mapping: {}           # optional raw-value -> {0,1} mapping for gender labels
+
+  gender_label_names:
+    "0": gender_label_0
+    "1": gender_label_1
+
+  age_min: 0
+  age_max: 120
+
+split:
+  train_fraction: 0.7
+  val_fraction: 0.15
+  test_fraction: 0.15
+  seed: 42
+  subject_level_if_available: true
+
+validation:
+  min_image_size: 32
+  max_file_size_mb: 20
+  detect_duplicate_hashes: true
+  detect_duplicate_paths: true
+  drop_corrupt_images: true
+  report_dir: ./outputs/data_quality
+
+dataloader:
+  batch_size: 64
+  num_workers: 2
+  pin_memory: false

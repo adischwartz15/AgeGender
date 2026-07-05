@@ -1,0 +1,63 @@
+# Training configuration: progressive fine-tuning stages, optimizer,
+# scheduler, and regularization settings.
+#
+# Progressive freezing (Stage A -> B -> C) is only scientifically meaningful
+# when the backbone starts from a checkpoint (self-supervised pretraining
+# from this repo, or a compatible user-supplied local checkpoint). When the
+# backbone is randomly initialized, the trainer emits a warning and runs a
+# single supervised warm-up stage instead of freezing random weights.
+
+training:
+  batch_size: 64
+  num_workers: 2
+  optimizer: adamw
+  weight_decay: 0.05
+  grad_clip_norm: 1.0
+  mixed_precision: true
+  seed: 42
+  early_stopping_patience: 8
+  selection_metrics: [val_age_mae, val_gender_accuracy, val_balanced_score]
+
+  scheduler:
+    name: cosine
+    warmup_epochs: 1
+
+  stages:
+    stage_a:
+      name: "Stage A: frozen backbone, train adapters + heads"
+      epochs: 6
+      lr: 1.0e-3
+      freeze_backbone: true
+      unfreeze_layers: []
+    stage_b:
+      name: "Stage B: unfreeze layer4"
+      epochs: 6
+      lr: 3.0e-4
+      freeze_backbone: true
+      unfreeze_layers: [layer4]
+    stage_c:
+      name: "Stage C: full fine-tune"
+      epochs: 8
+      lr: 5.0e-5
+      freeze_backbone: false
+      unfreeze_layers: [layer1, layer2, layer3, layer4, stem]
+
+  warm_up_from_scratch:
+    # used instead of staged freezing when there is no pretrained checkpoint
+    epochs: 12
+    lr: 1.0e-3
+
+pretrain:
+  epochs: 20
+  batch_size: 128
+  lr: 3.0e-4
+  weight_decay: 1.0e-6
+  temperature: 0.5
+  projection_dim: 128
+  num_workers: 2
+  checkpoint_name: simclr_encoder.pt
+
+calibration:
+  method: split_conformal
+  alpha: 0.10                 # target miscoverage -> 90% intervals
+  output_dir: ./outputs/calibration

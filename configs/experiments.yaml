@@ -1,0 +1,92 @@
+# Config-driven architecture ablation suite (see docs/architecture_analysis.md
+# and docs/experiment_plan.md for the research questions each experiment
+# answers). Each experiment is a set of overrides merged on top of
+# default.yaml + data.yaml + model.yaml + training.yaml. All experiments use
+# the same train/val/test split (data/splits/) whenever the split exists.
+
+experiments:
+  exp_a_separate:
+    description: >
+      Two independent Custom ResNet-18 backbones, one per task, with
+      independent heads and independent training. Tests whether a shared
+      backbone is even necessary.
+    overrides:
+      model:
+        architecture: separate
+        adapters:
+          enabled: false
+        loss_balancing:
+          mode: fixed
+
+  exp_b_shared_no_adapters:
+    description: >
+      One shared Custom ResNet-18 backbone feeding both an age head and a
+      gender head directly, no adapters, fixed loss weights. Tests whether
+      naive sharing causes negative transfer relative to Experiment A.
+    overrides:
+      model:
+        architecture: shared_no_adapters
+        adapters:
+          enabled: false
+        loss_balancing:
+          mode: fixed
+
+  exp_c_shared_adapters:
+    description: >
+      Shared backbone + task-specific bottleneck adapters, fixed loss
+      weights. Tests whether adapters recover per-task specialization
+      lost in Experiment B.
+    overrides:
+      model:
+        architecture: shared_adapters
+        adapters:
+          enabled: true
+        loss_balancing:
+          mode: fixed
+
+  exp_d_shared_adapters_learned_balance:
+    description: >
+      Shared backbone + adapters + learned homoscedastic-uncertainty loss
+      balancing. Tests whether learned weighting improves on fixed weights
+      when adapters are already present.
+    overrides:
+      model:
+        architecture: shared_adapters
+        adapters:
+          enabled: true
+        loss_balancing:
+          mode: learned_uncertainty
+
+  exp_e_parametric_vs_knn:
+    description: >
+      Compares the best parametric multi-task model (from exp_d, or exp_c if
+      learned balancing does not help) against a non-parametric k-NN
+      baseline built on its embedding space. Executed via
+      scripts/build_knn_index.py + scripts/evaluate.py --compare-knn, not a
+      separate training run.
+    base_experiment: exp_d_shared_adapters_learned_balance
+    overrides: {}
+
+  exp_f_pretrained_vs_scratch:
+    description: >
+      Optional comparison of a SimCLR self-supervised pretrained encoder
+      (scripts/pretrain.py) against the same architecture trained from
+      scratch. Requires running scripts/pretrain.py first; skipped
+      automatically (with a clear message) if no pretrained checkpoint
+      exists.
+    overrides:
+      model:
+        architecture: shared_adapters
+        adapters:
+          enabled: true
+        pretrained_checkpoint: ./checkpoints/simclr_encoder.pt
+        loss_balancing:
+          mode: learned_uncertainty
+
+run_order:
+  - exp_a_separate
+  - exp_b_shared_no_adapters
+  - exp_c_shared_adapters
+  - exp_d_shared_adapters_learned_balance
+  - exp_e_parametric_vs_knn
+  - exp_f_pretrained_vs_scratch
