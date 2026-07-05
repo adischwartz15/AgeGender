@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from evaluate import _default_output_name, evaluate_checkpoint  # noqa: E402
 from train import run_training  # noqa: E402
 
 from src.utils.config import REPO_ROOT, load_config, load_full_config  # noqa: E402
@@ -71,6 +72,19 @@ def main() -> int:
         except FileNotFoundError as exc:
             logger.error(str(exc))
             return 1
+
+        # Immediately evaluate this experiment's best checkpoint on the test
+        # split and save it under a name tied to the experiment, so
+        # scripts/generate_architecture_report.py's ablation table has real
+        # performance numbers (not just parameter counts/timing) per row.
+        checkpoint_dir = REPO_ROOT / config["paths"]["checkpoint_dir"]
+        checkpoint_path = checkpoint_dir / f"{name}_best_balanced_score.pt"
+        if checkpoint_path.exists():
+            test_metrics = evaluate_checkpoint(str(checkpoint_path), output_name=_default_output_name(str(checkpoint_path)))
+            if test_metrics is not None:
+                results[name]["test_metrics"] = test_metrics
+        else:
+            logger.warning("Checkpoint '%s' not found after training; skipping its test-set evaluation.", checkpoint_path)
 
     output_dir = REPO_ROOT / "outputs" / "architecture_analysis"
     output_dir.mkdir(parents=True, exist_ok=True)

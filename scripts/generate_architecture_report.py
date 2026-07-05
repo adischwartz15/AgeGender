@@ -109,6 +109,10 @@ def main() -> int:
         logger.info("Architecture 'separate' has no single shared embedding to visualize.")
 
     # Assemble ablation table from any per-experiment metrics already on disk.
+    # scripts/run_experiments.py saves, per experiment: "{name}_parameter_breakdown.json",
+    # "{name}_timing.json", and (right after training) "{name}_test_metrics.json"
+    # (via scripts/evaluate.py:evaluate_checkpoint) -- all three are merged here
+    # so the ablation table has real performance numbers, not just parameter counts.
     metrics_dir = REPO_ROOT / "outputs" / "metrics"
     experiment_results = {}
     for param_file in metrics_dir.glob("*_parameter_breakdown.json"):
@@ -119,7 +123,9 @@ def main() -> int:
             breakdown = json.load(fh)
         timing_file = metrics_dir / f"{exp_name}_timing.json"
         timing = json.load(open(timing_file)) if timing_file.exists() else {}
-        experiment_results[exp_name] = {"parameter_breakdown": breakdown, **timing}
+        test_metrics_file = metrics_dir / f"{exp_name}_test_metrics.json"
+        test_metrics = json.load(open(test_metrics_file)) if test_metrics_file.exists() else {}
+        experiment_results[exp_name] = {"parameter_breakdown": breakdown, "test_metrics": test_metrics, **timing}
     if experiment_results:
         table = build_architecture_ablation_table(experiment_results)
         table.to_csv(output_dir / "ablation_table.csv", index=False)

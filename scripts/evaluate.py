@@ -109,28 +109,35 @@ def compute_parametric_metrics(preds: dict, confidence_threshold: float, calibra
     return metrics
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--compare-knn", action="store_true")
-    parser.add_argument("--knn-path", default=str(REPO_ROOT / "outputs" / "knn" / "knn_baseline.pkl"))
-    parser.add_argument("--calibration-dir", default=str(REPO_ROOT / "outputs" / "calibration"))
-    parser.add_argument("--output-name", default="test_evaluation")
-    args = parser.parse_args()
+def evaluate_checkpoint(
+    checkpoint_path: str,
+    output_name: str = "test_evaluation",
+    compare_knn: bool = False,
+    knn_path: str | None = None,
+    calibration_dir: str | None = None,
+) -> dict | None:
+    """Evaluate a checkpoint on the test split, save metrics/plots, and return the metrics dict.
 
+    This is the callable core used both by this script's CLI and by
+    ``scripts/run_experiments.py`` (which calls it right after training each
+    architecture-ablation experiment so the resulting
+    ``outputs/metrics/{experiment}_test_metrics.json`` can be picked up by
+    ``scripts/generate_architecture_report.py``'s ablation table). Returns
+    None (after logging an error) if no prepared split exists yet.
+    """
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    model, config, _ = load_model_checkpoint(args.checkpoint, device)
+    model, config, _ = load_model_checkpoint(checkpoint_path, device)
 
     splits_path = REPO_ROOT / config["paths"]["splits_dir"] / "full_metadata_with_splits.csv"
     if not splits_path.exists():
         logger.error("No prepared split found at %s.", splits_path)
-        return 1
+        return None
     df = pd.read_csv(splits_path)
     test_df = df[df["split"] == "test"]
     dataset = FaceMultiTaskDataset(test_df, EvalTransform(config["dataset"]["image_size"]))
 
     preds = run_inference(model, dataset, device)
-    calibration = load_calibration(args.calibration_dir)
+    calibration = load_calibration(calibration_dir or REPO_ROOT / "outputs" / "calibration")
     confidence_threshold = config["model"]["gender_head"].get("confidence_threshold", 0.80)
     metrics = compute_parametric_metrics(preds, confidence_threshold, calibration)
 
@@ -138,13 +145,13 @@ def main() -> int:
     metrics_dir, plots_dir = output_dir / "metrics", output_dir / "plots"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
-    save_json(metrics, metrics_dir / f"{args.output_name}.json")
+    save_json(metrics, metrics_dir / f"{output_name}.json")
 
     age_mask = preds["age_mask"].astype(bool)
     if age_mask.any():
         y_true, q50 = preds["age"][age_mask], preds["q50"][age_mask]
-        plot_age_scatter(y_true, q50, plots_dir / f"{args.output_name}_age_scatter.png")
-        plot_error_histogram(y_true - q50, plots_dir / f"{args.output_name}_age_error_hist.png")
+        plot_age_scatter(y_true, q50, plots_dir / f"{output_name}_age_scatter.png")
+        plot_error_histogram(y_true - q50, plots_dir / f"{output_name}_age_error_hist.png")
         bucket_report = metrics["age_error_by_bucket"]
         labels = [k for k, v in bucket_report.items() if v["count"] > 0]
         if labels:
@@ -157,28 +164,63 @@ def main() -> int:
                 if ((y_true >= _bucket_lo(k)) & (y_true < _bucket_hi(k))).sum() > 0 else np.nan
                 for k in labels
             ])
-            plot_interval_coverage(labels, coverage_by_bucket, 0.80, plots_dir / f"{args.output_name}_interval_coverage.png")
+            plot_interval_coverage(labels, coverage_by_bucket, 0.80, plots_dir / f"{output_name}_interval_coverage.png")
 
     gender_mask = preds["gender_mask"].astype(bool)
     if gender_mask.any():
         y_true_gender = preds["gender"][gender_mask].astype(int)
         predicted = preds["probs"][gender_mask].argmax(axis=1)
         cm = confusion_matrix(y_true_gender, predicted, num_classes=config["model"]["gender_head"]["num_classes"])
-        plot_confusion_matrix(cm, config["model"]["gender_head"]["class_names"], plots_dir / f"{args.output_name}_confusion_matrix.png")
+        plot_confusion_matrix(cm, config["model"]["gender_head"]["class_names"], plots_dir / f"{output_name}_confusion_matrix.png")
 
-    if args.compare_knn:
-        knn_path = Path(args.knn_path)
-        if not knn_path.exists():
-            logger.warning("No k-NN index at %s; run 'make build-knn' first.", knn_path)
+    if compare_knn:
+        resolved_knn_path = Path(knn_path or REPO_ROOT / "outputs" / "knn" / "knn_baseline.pkl")
+        if not resolved_knn_path.exists():
+            logger.warning("No k-NN index at %s; run 'make build-knn' first.", resolved_knn_path)
         else:
-            knn = KNNEmbeddingBaseline.load(knn_path)
+            knn = KNNEmbeddingBaseline.load(resolved_knn_path)
             knn_metrics = _evaluate_knn(model, dataset, device, knn, confidence_threshold)
             table = build_parametric_vs_knn_table(metrics, knn_metrics)
             table.to_csv(REPO_ROOT / "outputs" / "knn" / "parametric_vs_knn.csv", index=False)
             logger.info("Saved parametric-vs-kNN comparison table")
 
     logger.info("Evaluation metrics: %s", {k: v for k, v in metrics.items() if not isinstance(v, dict)})
-    return 0
+    return metrics
+
+
+_CHECKPOINT_SUFFIXES = ("_best_balanced_score", "_best_age_mae", "_best_gender_accuracy")
+
+
+def _default_output_name(checkpoint_path: str) -> str:
+    """Derive '{experiment}_test_metrics' from a checkpoint filename.
+
+    E.g. "exp_c_shared_adapters_best_balanced_score.pt" -> "exp_c_shared_adapters_test_metrics".
+    This is what lets scripts/generate_architecture_report.py's ablation
+    table pick up real performance numbers for *any* evaluated checkpoint,
+    not just ones evaluated via scripts/run_experiments.py, without the
+    caller having to remember to pass --output-name.
+    """
+    stem = Path(checkpoint_path).stem
+    for suffix in _CHECKPOINT_SUFFIXES:
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)] + "_test_metrics"
+    return stem + "_test_metrics"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--compare-knn", action="store_true")
+    parser.add_argument("--knn-path", default=str(REPO_ROOT / "outputs" / "knn" / "knn_baseline.pkl"))
+    parser.add_argument("--calibration-dir", default=str(REPO_ROOT / "outputs" / "calibration"))
+    parser.add_argument("--output-name", default=None, help="Default: derived from the checkpoint filename")
+    args = parser.parse_args()
+
+    output_name = args.output_name or _default_output_name(args.checkpoint)
+    metrics = evaluate_checkpoint(
+        args.checkpoint, output_name, args.compare_knn, args.knn_path, args.calibration_dir
+    )
+    return 0 if metrics is not None else 1
 
 
 def _bucket_lo(label: str) -> float:
