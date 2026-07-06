@@ -89,6 +89,35 @@ def test_predict_endpoint_schema_with_mocked_model():
     assert "research and demonstration only" in body["disclaimer"]
 
 
+def test_predict_reports_no_face_detected_on_synthetic_noise_image():
+    """Face detection is enabled by default; a random-noise upload has no real face in it."""
+    with TestClient(app) as client:
+        dependencies.app_state.predictor = _make_fake_predictor()
+        dependencies.app_state.config = {"api": {"model_version": "v1-test"}}
+
+        response = client.post(
+            "/predict", files={"file": ("test.png", _sample_image_bytes(), "image/png")}
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["face_detected"] is False
+    assert any("No face detected" in w for w in body["warnings"])
+
+
+def test_predict_face_detected_is_null_when_disabled():
+    with TestClient(app) as client:
+        dependencies.app_state.predictor = _make_fake_predictor({"enable_face_detection": False})
+        dependencies.app_state.config = {"api": {"model_version": "v1-test"}}
+
+        response = client.post(
+            "/predict", files={"file": ("test.png", _sample_image_bytes(), "image/png")}
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["face_detected"] is None
+    assert not any("No face detected" in w for w in body["warnings"])
+
+
 def test_predict_endpoint_returns_503_when_no_model_loaded():
     with TestClient(app) as client:
         empty_artifacts = LoadedArtifacts(model=None, warnings=["no checkpoint"])

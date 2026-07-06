@@ -9,6 +9,18 @@ import UncertaintyPanel from "./UncertaintyPanel";
 export default function PredictionPanel({ result }: { result: PredictionResponse }) {
   return (
     <div className="space-y-4">
+      {result.face_detected !== null && (
+        <p
+          className={`text-xs font-medium ${
+            result.face_detected ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400"
+          }`}
+        >
+          {result.face_detected
+            ? "Face detected: the model was run on a cropped face region (classical Haar-cascade detection)."
+            : "No face detected: the model was run on the full uploaded image."}
+        </p>
+      )}
+
       {result.warnings.length > 0 && (
         <ul className="space-y-1">
           {result.warnings.map((warning) => (

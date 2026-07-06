@@ -319,6 +319,21 @@ Starts Uvicorn on `:8000`. Endpoints:
 Uploaded images are processed in memory and are not persisted to disk by
 default.
 
+**Face-region preprocessing.** Since the model is trained on tightly
+face-cropped images (e.g. UTKFace), `/predict` and friends first crop to
+the largest detected face using a classical Haar cascade
+(`src/inference/face_detection.py` -- OpenCV's bundled Viola-Jones
+detector, not a neural network, no pretrained weights downloaded) before
+running the model, so an arbitrary uploaded photo (with background,
+clothing, hair styling, etc.) is closer to what the model actually
+learned from. If no face is found, the full image is used instead and a
+warning is returned rather than silently proceeding as if a crop was
+applied. Toggle via `api.enable_face_detection` /
+`api.face_margin_ratio` in `configs/api.yaml`. This is a real but
+classical/moderate-accuracy detector -- it can miss faces at extreme
+angles, in poor lighting, or when occluded, and does not perform
+identity verification or any other biometric function.
+
 ## Frontend (React)
 
 ```bash
@@ -394,14 +409,24 @@ output), and `docs/architecture_analysis_generated.md` (produced by
   (`make train` or `make experiments`) and confirm
   `configs/api.yaml: api.active_checkpoint` points at a real file, then hit
   `POST /admin/reload-models`.
-- **Kaggle download fails with a credentials error**: re-check
-  `KAGGLE_USERNAME`/`KAGGLE_KEY`/`KAGGLE_DATASET_SLUG` are exported in your
-  shell (not just written in `.env` -- `.env` is not auto-sourced by
-  Python; `source .env` or export the values, or use `python-dotenv` in
-  your own wrapper if you prefer).
+- **Kaggle download fails with a credentials error**: confirm
+  `KAGGLE_USERNAME`/`KAGGLE_KEY`/`KAGGLE_DATASET_SLUG` are set, either in a
+  local `.env` file (copied from `.env.example` -- loaded automatically by
+  `src/utils/config.py:load_env_file()`) or exported directly in your shell
+  (shell exports always take priority over `.env`).
 - **CUDA out of memory**: lower `training.batch_size` in
   `configs/training.yaml`, or run on CPU (`device: cpu` in
   `configs/default.yaml`) for small-scale experimentation.
+- **Predictions look wildly wrong / overconfident on a photo that looks
+  fine to you**: check the response's `face_detected` field and
+  `warnings`. The model is trained on tightly face-cropped images (e.g.
+  UTKFace); a photo with a lot of background, heavy styling/makeup,
+  jewelry, or a watermark/overlay across the face is a different visual
+  distribution even when a human would call it "a clear photo of a
+  person," and face-crop preprocessing (see "Face-region preprocessing"
+  above) only partially compensates for that gap. Try a plain,
+  front-facing, tightly-cropped photo to check whether the issue is
+  input distribution rather than a bug.
 - **Frontend can't reach the API**: confirm the backend is running on
   `:8000` and, in Docker, that both containers are on the same compose
   network (they are, by default, via `docker-compose.yml`).

@@ -20,6 +20,7 @@ from src.data.transforms import EvalTransform
 from src.evaluation.calibration import apply_conformal_offset
 from src.evaluation.gradcam import GradCAM, resize_heatmap
 from src.inference.artifacts import LoadedArtifacts
+from src.inference.face_detection import crop_to_face
 from src.inference.quality import QualityDiagnostics, compute_quality_diagnostics
 
 
@@ -62,6 +63,8 @@ class PredictionResult:
     knn: KNNComparison | None
     model_version: str
     checkpoint_name: str | None
+    face_detected: bool | None = None
+    model_input_image: Image.Image | None = field(default=None, repr=False)
     warnings: list[str] = field(default_factory=list)
     latency_ms: float = 0.0
 
@@ -75,6 +78,8 @@ class Predictor:
         self.device = device
         self.model = artifacts.model
         self.config = artifacts.model_config
+        self.enable_face_detection: bool = api_config.get("enable_face_detection", True)
+        self.face_margin_ratio: float = api_config.get("face_margin_ratio", 0.35)
 
         if self.model is not None:
             gender_head_cfg = self.config["model"]["gender_head"]
@@ -120,7 +125,19 @@ class Predictor:
                 "See the warnings field for how to produce one."
             )
 
-        image_tensor = self.transform(image.convert("RGB")).unsqueeze(0).to(self.device)
+        image_rgb = image.convert("RGB")
+        face_detected: bool | None = None
+        model_input_image = image_rgb
+        if self.enable_face_detection:
+            model_input_image, face_detected = crop_to_face(image_rgb, self.face_margin_ratio)
+            if not face_detected:
+                warnings.append(
+                    "No face detected via classical Haar-cascade detection; using the "
+                    "full image, which may reduce prediction reliability since the "
+                    "model expects a face-centered crop similar to its training data."
+                )
+
+        image_tensor = self.transform(model_input_image).unsqueeze(0).to(self.device)
 
         with torch.no_grad():
             outputs = self.model(image_tensor)
@@ -146,7 +163,11 @@ class Predictor:
         if include_gradcam and self.gradcam is not None:
             age_result = self.gradcam.generate(image_tensor.clone(), task="age")
             gender_result = self.gradcam.generate(image_tensor.clone(), task="gender")
-            size = image.convert("RGB").size
+            # Overlay onto model_input_image (the face crop actually fed to the
+            # model), not the raw upload -- resizing the heatmap to the raw
+            # upload's dimensions would misalign it whenever a face crop
+            # changed the aspect ratio/region relative to the original.
+            size = model_input_image.size
             gradcam_age = resize_heatmap(age_result["heatmap"], size)
             gradcam_gender = resize_heatmap(gender_result["heatmap"], size)
 
@@ -171,6 +192,8 @@ class Predictor:
             knn=knn_result,
             model_version=self.api_config.get("model_version", "v1"),
             checkpoint_name=self.artifacts.checkpoint_name,
+            face_detected=face_detected,
+            model_input_image=model_input_image,
             warnings=warnings,
             latency_ms=latency_ms,
         )

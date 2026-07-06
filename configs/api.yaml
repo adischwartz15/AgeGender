@@ -21,3 +21,12 @@ api:
   request_timeout_seconds: 30
   enable_gradcam: true
   enable_knn_comparison: true
+  # Crop to the largest detected face (classical Haar cascade, not a
+  # neural network -- src/inference/face_detection.py) before running the
+  # model, since the model is trained on tightly face-cropped images
+  # (e.g. UTKFace) and an arbitrary uploaded photo otherwise includes a
+  # lot of background/clothing/context the model never saw in training.
+  # When no face is found, the full image is used and a warning is
+  # returned instead of silently proceeding as if a crop was applied.
+  enable_face_detection: true
+  face_margin_ratio: 0.35

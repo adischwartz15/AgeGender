@@ -97,6 +97,9 @@ class PredictionResponse(BaseModel):
     knn_comparison: KNNComparisonResponse | None
     model_version: str
     checkpoint_name: str | None
+    face_detected: bool | None = Field(
+        None, description="Whether classical Haar-cascade face detection found a face to crop to; null if disabled."
+    )
     warnings: list[str]
     latency_ms: float
     disclaimer: str = DISCLAIMER

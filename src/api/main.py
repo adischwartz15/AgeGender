@@ -144,11 +144,14 @@ async def quality_check(file: UploadFile = File(...)) -> QualityDiagnosticsRespo
     return QualityDiagnosticsResponse(**diagnostics.as_dict())
 
 
-def _build_prediction_response(result, include_gradcam: bool, image: Image.Image) -> PredictionResponse:
+def _build_prediction_response(result) -> PredictionResponse:
     gradcam_response = None
-    if include_gradcam:
-        age_b64 = _encode_heatmap_overlay(image, result.gradcam_age) if result.gradcam_age is not None else None
-        gender_b64 = _encode_heatmap_overlay(image, result.gradcam_gender) if result.gradcam_gender is not None else None
+    if result.gradcam_age is not None or result.gradcam_gender is not None:
+        # Overlay onto the face crop actually fed to the model (model_input_image),
+        # not the raw upload -- see predictor.py for why.
+        base_image = result.model_input_image
+        age_b64 = _encode_heatmap_overlay(base_image, result.gradcam_age) if result.gradcam_age is not None else None
+        gender_b64 = _encode_heatmap_overlay(base_image, result.gradcam_gender) if result.gradcam_gender is not None else None
         gradcam_response = GradCamResponse(age_attention_map_base64=age_b64, gender_attention_map_base64=gender_b64)
 
     knn_response = None
@@ -188,6 +191,7 @@ def _build_prediction_response(result, include_gradcam: bool, image: Image.Image
         knn_comparison=knn_response,
         model_version=result.model_version,
         checkpoint_name=result.checkpoint_name,
+        face_detected=result.face_detected,
         warnings=result.warnings,
         latency_ms=result.latency_ms,
     )
@@ -206,7 +210,7 @@ async def predict(
         )
     image = await _read_image(file)
     result = predictor.predict(image, include_gradcam=include_gradcam, include_knn=include_knn)
-    return _build_prediction_response(result, include_gradcam, image)
+    return _build_prediction_response(result)
 
 
 @app.post("/predict/compare", response_model=PredictionResponse)
@@ -217,7 +221,7 @@ async def predict_compare(file: UploadFile = File(...)) -> PredictionResponse:
         raise HTTPException(status_code=503, detail="No trained model checkpoint is loaded.")
     image = await _read_image(file)
     result = predictor.predict(image, include_gradcam=False, include_knn=True)
-    return _build_prediction_response(result, False, image)
+    return _build_prediction_response(result)
 
 
 @app.post("/predict/gradcam", response_model=PredictionResponse)
@@ -228,7 +232,7 @@ async def predict_gradcam(file: UploadFile = File(...)) -> PredictionResponse:
         raise HTTPException(status_code=503, detail="No trained model checkpoint is loaded.")
     image = await _read_image(file)
     result = predictor.predict(image, include_gradcam=True, include_knn=False)
-    return _build_prediction_response(result, True, image)
+    return _build_prediction_response(result)
 
 
 @app.post("/admin/reload-models", response_model=ReloadModelsResponse)
