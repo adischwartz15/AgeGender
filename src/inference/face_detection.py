@@ -18,6 +18,16 @@ angles, in poor lighting, or when partially occluded, and picks the
 single largest detected face if more than one is present. It performs no
 identity verification, liveness check, landmark localization, or any
 other biometric function beyond locating a face-shaped region to crop.
+
+Detection tries a small, fixed sequence of cascades/parameters from
+strictest to most lenient (see ``_DETECTION_ATTEMPTS``) before giving up,
+since any single Haar cascade + parameter set misses real faces often
+enough in practice (watermarks/overlays, scale, lighting) that a single
+strict pass is not a good user experience. This only ever *increases*
+recall (finds faces a stricter pass would miss); it never invents a face
+where a human would clearly see none, since even the most lenient
+attempt still requires the classifier's own boosted-feature cascade to
+fire on real structure.
 """
 
 from __future__ import annotations
@@ -30,14 +40,22 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-_CASCADE_FILENAME = "haarcascade_frontalface_default.xml"
-_face_cascade: "cv2.CascadeClassifier | None" = None
+# (cascade filename, scaleFactor, minNeighbors, minSize) -- strictest first.
+# alt2 is commonly reported as more accurate than the classic "default"
+# cascade; the final pass loosens minNeighbors/minSize/scaleFactor to
+# catch smaller or less textbook-frontal faces before giving up.
+_DETECTION_ATTEMPTS = (
+    ("haarcascade_frontalface_default.xml", 1.1, 5, (40, 40)),
+    ("haarcascade_frontalface_alt2.xml", 1.1, 5, (40, 40)),
+    ("haarcascade_frontalface_alt2.xml", 1.05, 3, (30, 30)),
+)
+
+_cascade_cache: dict[str, cv2.CascadeClassifier] = {}
 
 
-def _get_cascade() -> cv2.CascadeClassifier:
-    global _face_cascade
-    if _face_cascade is None:
-        cascade_path = cv2.data.haarcascades + _CASCADE_FILENAME
+def _get_cascade(filename: str) -> cv2.CascadeClassifier:
+    if filename not in _cascade_cache:
+        cascade_path = cv2.data.haarcascades + filename
         classifier = cv2.CascadeClassifier(cascade_path)
         if classifier.empty():
             raise RuntimeError(
@@ -45,20 +63,29 @@ def _get_cascade() -> cv2.CascadeClassifier:
                 "opencv-python-headless<5.0 (see requirements.txt); a newer opencv-python "
                 "build may not bundle it."
             )
-        _face_cascade = classifier
-    return _face_cascade
+        _cascade_cache[filename] = classifier
+    return _cascade_cache[filename]
 
 
 def detect_largest_face(image: Image.Image) -> tuple[int, int, int, int] | None:
-    """Return ``(x, y, w, h)`` of the largest detected face, or None if none found."""
+    """Return ``(x, y, w, h)`` of the largest detected face, or None if none found.
+
+    Tries each entry in ``_DETECTION_ATTEMPTS`` in order and returns on the
+    first one that finds anything, rather than only ever trying a single
+    strict configuration.
+    """
     gray = np.asarray(image.convert("L"))
     gray = cv2.equalizeHist(gray)  # improves detection robustness under uneven lighting
-    cascade = _get_cascade()
-    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(40, 40))
-    if len(faces) == 0:
-        return None
-    x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
-    return int(x), int(y), int(w), int(h)
+
+    for filename, scale_factor, min_neighbors, min_size in _DETECTION_ATTEMPTS:
+        cascade = _get_cascade(filename)
+        faces = cascade.detectMultiScale(
+            gray, scaleFactor=scale_factor, minNeighbors=min_neighbors, minSize=min_size
+        )
+        if len(faces) > 0:
+            x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
+            return int(x), int(y), int(w), int(h)
+    return None
 
 
 def crop_to_face(image: Image.Image, margin_ratio: float = 0.35) -> tuple[Image.Image, bool]:

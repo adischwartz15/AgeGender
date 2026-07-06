@@ -65,3 +65,54 @@ def test_crop_to_face_converts_to_rgb():
     grayscale = Image.new("L", (100, 100), 128)
     cropped, _ = crop_to_face(grayscale)
     assert cropped.mode == "RGB"
+
+
+class _FakeCascade:
+    """Stand-in for cv2.CascadeClassifier returning canned detectMultiScale results."""
+
+    def __init__(self, boxes):
+        self._boxes = boxes  # list of (x, y, w, h) tuples, or [] for "nothing found"
+
+    def detectMultiScale(self, *args, **kwargs):
+        return np.array(self._boxes, dtype=int) if self._boxes else np.empty((0, 4), dtype=int)
+
+
+def test_detect_largest_face_falls_through_to_later_attempts(monkeypatch):
+    """The first two (stricter) cascade attempts find nothing; the third (most lenient) does."""
+    calls = []
+
+    def fake_get_cascade(filename):
+        calls.append(filename)
+        # Only the third configured attempt (index 2) "finds" a face.
+        if len(calls) < 3:
+            return _FakeCascade([])
+        return _FakeCascade([(10, 10, 50, 50)])
+
+    monkeypatch.setattr(face_detection, "_get_cascade", fake_get_cascade)
+    box = face_detection.detect_largest_face(_solid_color_image())
+
+    assert box == (10, 10, 50, 50)
+    assert len(calls) == 3  # tried all three configured attempts before succeeding on the last
+
+
+def test_detect_largest_face_stops_at_first_successful_attempt(monkeypatch):
+    calls = []
+
+    def fake_get_cascade(filename):
+        calls.append(filename)
+        return _FakeCascade([(5, 5, 20, 20)])
+
+    monkeypatch.setattr(face_detection, "_get_cascade", fake_get_cascade)
+    box = face_detection.detect_largest_face(_solid_color_image())
+
+    assert box == (5, 5, 20, 20)
+    assert len(calls) == 1  # did not try further attempts once the first one succeeded
+
+
+def test_detect_largest_face_picks_largest_box_when_multiple_found(monkeypatch):
+    monkeypatch.setattr(
+        face_detection, "_get_cascade",
+        lambda filename: _FakeCascade([(0, 0, 10, 10), (20, 20, 60, 60), (5, 5, 30, 30)]),
+    )
+    box = face_detection.detect_largest_face(_solid_color_image())
+    assert box == (20, 20, 60, 60)
