@@ -1,6 +1,6 @@
 .PHONY: install test download-data prepare-data pretrain train experiments \
         calibrate build-knn evaluate robustness gradcam architecture-report \
-        api frontend docker-up
+        api frontend
 
 PYTHON ?= python
 CHECKPOINT ?= checkpoints/multitask_best_balanced_score.pt
@@ -51,6 +51,3 @@ api:
 
 frontend:
 	cd frontend && npm run dev
-
-docker-up:
-	docker compose up --build

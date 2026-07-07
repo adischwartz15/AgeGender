@@ -17,6 +17,7 @@ explainability -- built from scratch on a manually implemented ResNet-18.
 - [Research objective](#research-objective)
 - [Ethical limitations](#ethical-limitations)
 - [Architecture](#architecture)
+- [Results](#results)
 - [Repository layout](#repository-layout)
 - [Setup](#setup)
 - [Kaggle API setup](#kaggle-api-setup)
@@ -31,7 +32,6 @@ explainability -- built from scratch on a manually implemented ResNet-18.
 - [Grad-CAM explainability](#grad-cam-explainability)
 - [Backend (FastAPI)](#backend-fastapi)
 - [Frontend (React)](#frontend-react)
-- [Docker](#docker)
 - [Example API requests](#example-api-requests)
 - [Evaluation metric definitions](#evaluation-metric-definitions)
 - [Gradient interference and representation similarity](#gradient-interference-and-representation-similarity)
@@ -115,6 +115,88 @@ Age Quantile Head                          Gender Classification Head
   learned homoscedastic-uncertainty weighting, with masked losses so a
   task with no labels in a batch contributes nothing.
 
+## Results
+
+Real numbers from an actual training run on UTKFace (via the Kaggle API,
+default configs unless noted) -- not fabricated placeholders. Reproduce
+with `make experiments`, `make build-knn`, `make evaluate --compare-knn`,
+`make robustness`, and `make architecture-report`; see
+`docs/architecture_analysis_generated.md` for the full, regenerated
+report after you run the pipeline yourself.
+
+### Architecture parameter comparison (Experiments A-D)
+
+| Experiment | Backbone params | Adapter params | Total params |
+|---|---|---|---|
+| A -- separate backbones | 22,353,024 | 0 | 22,484,997 |
+| B -- shared, no adapters | 11,176,512 | 0 | 11,308,485 |
+| C -- shared + adapters | 11,176,512 | 263,424 | 11,571,909 |
+| D -- shared + adapters + learned balancing | 11,176,512 | 263,424 | 11,571,911 |
+
+Sharing the backbone (B/C/D) roughly halves parameter count versus
+independent backbones (A); adapters add back only ~2.4% of the shared
+backbone's parameters per task. *Per-experiment accuracy/MAE comparison
+(does sharing + adapters actually help, not just cost fewer parameters)
+requires re-running `scripts/evaluate.py` against each experiment's
+checkpoint and isn't included here yet -- the sections below reflect one
+specific (shared-backbone + adapters) checkpoint, not a cross-experiment
+comparison.*
+
+### Parametric model vs. k-NN baseline (shared-backbone + adapters model)
+
+| Metric | Parametric | k-NN (k=15) |
+|---|---|---|
+| Age MAE | 5.71 | 5.79 |
+| Age RMSE | 8.32 | 8.53 |
+| q10-q90 interval coverage | 0.79 | 0.91 |
+| Mean interval width | 16.79 | 26.88 |
+| Gender-label accuracy | 0.970 | 0.966 |
+| Abstention rate | 0.192 | 0.179 |
+| Latency per image (ms) | 1.8 | 2.0 |
+
+The k-NN baseline is competitive on gender-label accuracy and reaches
+*higher* interval coverage than the (uncalibrated) parametric model, at
+the cost of much wider intervals -- consistent with a non-parametric
+method being more conservative rather than more precise here.
+
+### Gradient interference and representation similarity
+
+Measured on the shared-backbone + adapters model (30 sampled batches;
+see [Gradient interference and representation similarity](#gradient-interference-and-representation-similarity)
+below for methodology):
+
+- Mean task-gradient cosine similarity: **+0.08** (std 0.33) -- weakly
+  positive, i.e. the age and gender-label gradients are not strongly in
+  conflict on this dataset/split, with meaningful batch-to-batch variance.
+- Linear CKA: shared-vs-age-adapter **0.79**, shared-vs-gender-adapter
+  **0.90**, age-vs-gender-adapter **0.59** -- the gender adapter moves
+  the shared representation less than the age adapter does, and the two
+  adapters diverge from each other more than either diverges from the
+  shared embedding.
+
+### Robustness (deterministic corruptions, severity 1 of 3)
+
+| Condition | Age MAE | Gender accuracy |
+|---|---|---|
+| Clean (no corruption) | 5.52 | 0.975 |
+| Gaussian blur | 5.72 | 0.953 |
+| Low resolution | 5.82 | 0.934 |
+| Low brightness | 6.21 | 0.962 |
+| JPEG compression | 6.60 | 0.960 |
+| High brightness | 6.80 | 0.947 |
+| Partial crop | 8.50 | 0.868 |
+| **Partial occlusion** | **13.35** | 0.765 |
+| **Gaussian noise** | **14.82** | 0.960 |
+
+Gaussian noise and partial occlusion are, by a wide margin, the most
+damaging conditions for age estimation in this run; gender-label
+accuracy degrades more gracefully except under occlusion.
+
+*(All numbers above are from one real training run and one dataset
+split -- see [Results depend on your data](#results-depend-on-your-data);
+they are not a claim about performance on any other dataset, population,
+or camera.)*
+
 ## Repository layout
 
 See the full tree in `docs/` if needed; top level:
@@ -134,7 +216,7 @@ outputs/       Metrics, plots, reports, gradcam, robustness, calibration, kNN ar
 ## Setup
 
 Requirements: Python 3.11+ (3.10+ also works), Node.js 20+/npm for the
-frontend, Docker + Docker Compose (optional).
+frontend.
 
 ```bash
 git clone <this-repo>
@@ -320,15 +402,18 @@ Uploaded images are processed in memory and are not persisted to disk by
 default.
 
 **Face-region preprocessing.** Since the model is trained on tightly
-face-cropped images (e.g. UTKFace), `/predict` and friends first crop to
-the largest detected face using a classical Haar cascade
+face-cropped images (e.g. UTKFace), `/predict` and friends first try to
+crop to the largest detected face using a classical Haar cascade
 (`src/inference/face_detection.py` -- OpenCV's bundled Viola-Jones
-detector, not a neural network, no pretrained weights downloaded) before
-running the model, so an arbitrary uploaded photo (with background,
-clothing, hair styling, etc.) is closer to what the model actually
-learned from. If no face is found, the full image is used instead and a
-warning is returned rather than silently proceeding as if a crop was
-applied. Toggle via `api.enable_face_detection` /
+detector, not a neural network, no pretrained weights downloaded), so an
+arbitrary uploaded photo (with background, clothing, hair styling, etc.)
+is closer to what the model actually learned from. **If no face is
+found, the API declines to generate an age or dataset gender-label
+prediction at all** (`age`/`gender`/`gradcam` are returned as `null`,
+with a warning explaining why) rather than running the model on a
+non-face image and returning a confident-looking but meaningless
+result -- e.g. a photo of an object or an animal should not receive an
+age or gender-label guess. Toggle via `api.enable_face_detection` /
 `api.face_margin_ratio` in `configs/api.yaml`. This is a real but
 classical/moderate-accuracy detector -- it can miss faces at extreme
 angles, in poor lighting, or when occluded, and does not perform
@@ -345,17 +430,6 @@ Starts the Vite dev server on `:5173` (proxies `/api` to `:8000`, see
 notice, age/gender/uncertainty/quality/Grad-CAM/kNN-comparison panels, and
 a visible research disclaimer, built with Tailwind CSS.
 
-## Docker
-
-```bash
-make docker-up
-```
-
-Builds and runs the API (`Dockerfile`, port 8000) and frontend
-(`frontend/Dockerfile` + nginx, port 5173) via `docker-compose.yml`.
-Checkpoints/outputs/splits are mounted read-only into the API container --
-train and prepare data on the host first.
-
 ## Example API requests
 
 ```bash
@@ -368,7 +442,7 @@ curl -X POST "http://localhost:8000/predict?include_gradcam=true&include_knn=tru
   -F "file=@/path/to/face.jpg"
 ```
 
-Example (abridged) `/predict` response shape:
+Example (abridged) `/predict` response shape, when a face was detected:
 
 ```json
 {
@@ -379,8 +453,28 @@ Example (abridged) `/predict` response shape:
   "knn_comparison": null,
   "model_version": "v1",
   "checkpoint_name": "multitask_best_balanced_score.pt",
+  "face_detected": true,
   "warnings": [],
   "latency_ms": 42.3,
+  "disclaimer": "This tool is for research and demonstration only. ..."
+}
+```
+
+...and when no face was detected (`age`/`gender`/`gradcam`/`knn_comparison`
+are all `null` -- no prediction is generated):
+
+```json
+{
+  "age": null,
+  "gender": null,
+  "quality": {"width": 800, "height": 600, "brightness": 0.61, "contrast": 0.30, "blur_score": 210.5, "warnings": []},
+  "gradcam": null,
+  "knn_comparison": null,
+  "model_version": "v1",
+  "checkpoint_name": "multitask_best_balanced_score.pt",
+  "face_detected": false,
+  "warnings": ["No face detected via classical Haar-cascade detection; declining to generate age or dataset gender-label predictions, since the model is only meaningful on face images similar to its training data."],
+  "latency_ms": 8.1,
   "disclaimer": "This tool is for research and demonstration only. ..."
 }
 ```
@@ -428,8 +522,8 @@ output), and `docs/architecture_analysis_generated.md` (produced by
   front-facing, tightly-cropped photo to check whether the issue is
   input distribution rather than a bug.
 - **Frontend can't reach the API**: confirm the backend is running on
-  `:8000` and, in Docker, that both containers are on the same compose
-  network (they are, by default, via `docker-compose.yml`).
+  `:8000` (`curl http://localhost:8000/health`) and that the Vite dev
+  server's proxy config (`frontend/vite.config.ts`) points at it.
 - **Tests fail with `ModuleNotFoundError: src`**: run pytest from the
   repository root (`pyproject.toml` sets `pythonpath = ["."]`), or
   `pip install -e .`-equivalent isn't required since tests add the repo

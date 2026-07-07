@@ -1,7 +1,7 @@
 import type { HealthResponse, ModelInfoResponse, PredictionResponse, QualityDiagnostics } from "./types";
 
 // In dev, Vite proxies /api -> http://localhost:8000 (see vite.config.ts).
-// In production (Docker), set VITE_API_BASE_URL at build time.
+// For any other deployment, set VITE_API_BASE_URL at build time.
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "/api";
 
 async function parseJsonOrThrow<T>(response: Response): Promise<T> {
