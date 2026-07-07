@@ -7,7 +7,13 @@ this module invents numbers; it only aggregates and tabulates real results.
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
+
+_SEED_METRIC_KEYS = (
+    "age_mae", "age_rmse", "gender_accuracy", "abstention_rate",
+    "interval_coverage", "mean_interval_width", "latency_ms_per_image",
+)
 
 
 def build_parametric_vs_knn_table(parametric_metrics: dict, knn_metrics: dict) -> pd.DataFrame:
@@ -85,4 +91,50 @@ def build_backbone_comparison_table(cnn_metrics: dict, resnet_metrics: dict) -> 
     rows = []
     for key, label in keys:
         rows.append({"metric": label, "simple_cnn": cnn_metrics.get(key), "custom_resnet18": resnet_metrics.get(key)})
+    return pd.DataFrame(rows)
+
+
+def aggregate_seed_metrics(per_seed_metrics: list[dict], keys: tuple[str, ...] = _SEED_METRIC_KEYS) -> dict:
+    """Compute mean +/- std across N seed runs' test-metric dicts.
+
+    Returns ``{key: {"mean": ..., "std": ..., "n_seeds": N}}`` for each
+    key present (and numeric) in at least one provided dict; missing
+    values for a given seed are simply excluded from that key's mean/std
+    rather than treated as zero. With fewer than 2 seed runs, ``std`` is
+    reported as ``None`` (not 0.0) so callers can render an honest
+    "insufficient runs" message instead of a misleadingly precise number.
+    """
+    result: dict[str, dict] = {}
+    n_seeds = len(per_seed_metrics)
+    for key in keys:
+        values = [m[key] for m in per_seed_metrics if m.get(key) is not None]
+        if not values:
+            continue
+        result[key] = {
+            "mean": float(np.mean(values)),
+            "std": float(np.std(values)) if len(values) >= 2 else None,
+            "n_seeds": len(values),
+        }
+    result["_n_seed_runs"] = n_seeds
+    return result
+
+
+def build_seed_aggregate_table(aggregates: dict[str, dict]) -> pd.DataFrame:
+    """One row per experiment, columns = mean +/- std for each metric.
+
+    ``aggregates`` maps experiment name -> the dict returned by
+    :func:`aggregate_seed_metrics`.
+    """
+    rows = []
+    for exp_name, agg in aggregates.items():
+        row = {"experiment": exp_name, "n_seeds": agg.get("_n_seed_runs")}
+        for key in _SEED_METRIC_KEYS:
+            stats = agg.get(key)
+            if stats is None:
+                row[key] = None
+            elif stats["std"] is None:
+                row[key] = f"{stats['mean']:.3f} (n=1, no std)"
+            else:
+                row[key] = f"{stats['mean']:.3f} +/- {stats['std']:.3f}"
+        rows.append(row)
     return pd.DataFrame(rows)

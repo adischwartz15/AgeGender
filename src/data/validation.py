@@ -113,15 +113,23 @@ def validate_dataset(df: pd.DataFrame, validation_cfg: dict) -> tuple[pd.DataFra
 
 
 def validate_and_split(df: pd.DataFrame, data_config: dict) -> tuple[pd.DataFrame, dict]:
-    """Run validation, then a deterministic (leakage-checked) train/val/test split."""
+    """Run validation, then a deterministic (leakage-checked) train/validation/calibration/test split.
+
+    Note: ``data_config["validation"]`` is the *image-quality* validation
+    config (corrupt/duplicate detection etc.); the *data split* named
+    "validation" is configured separately under ``data_config["split"]``
+    and produced by :func:`split_dataframe`. These are two different uses
+    of the word "validation" that predate the 4-way split protocol.
+    """
     validation_cfg = data_config.get("validation", {})
     split_cfg = data_config.get("split", {})
 
     clean_df, report = validate_dataset(df, validation_cfg)
     split_df = split_dataframe(
         clean_df,
-        train_fraction=split_cfg.get("train_fraction", 0.7),
-        val_fraction=split_cfg.get("val_fraction", 0.15),
+        train_fraction=split_cfg.get("train_fraction", 0.60),
+        validation_fraction=split_cfg.get("validation_fraction", 0.15),
+        calibration_fraction=split_cfg.get("calibration_fraction", 0.10),
         test_fraction=split_cfg.get("test_fraction", 0.15),
         seed=split_cfg.get("seed", 42),
         subject_level_if_available=split_cfg.get("subject_level_if_available", True),

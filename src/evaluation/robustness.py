@@ -16,7 +16,8 @@ from PIL import Image, ImageEnhance, ImageFilter
 
 CORRUPTION_NAMES = (
     "gaussian_blur", "gaussian_noise", "low_resolution", "jpeg_compression",
-    "low_brightness", "high_brightness", "partial_occlusion", "partial_crop",
+    "low_brightness", "high_brightness", "low_contrast", "high_contrast",
+    "grayscale", "partial_occlusion", "partial_crop",
 )
 
 
@@ -53,6 +54,21 @@ def high_brightness(image: Image.Image, factor: float, seed: int = 0) -> Image.I
     return ImageEnhance.Brightness(image).enhance(factor)
 
 
+def low_contrast(image: Image.Image, factor: float, seed: int = 0) -> Image.Image:
+    return ImageEnhance.Contrast(image).enhance(factor)
+
+
+def high_contrast(image: Image.Image, factor: float, seed: int = 0) -> Image.Image:
+    return ImageEnhance.Contrast(image).enhance(factor)
+
+
+def grayscale(image: Image.Image, blend_factor: float, seed: int = 0) -> Image.Image:
+    """Desaturate by blending toward full grayscale; blend_factor=1.0 is fully grayscale (still 3-channel)."""
+    rgb = image.convert("RGB")
+    gray_as_rgb = rgb.convert("L").convert("RGB")
+    return Image.blend(rgb, gray_as_rgb, alpha=min(max(blend_factor, 0.0), 1.0))
+
+
 def partial_occlusion(image: Image.Image, occlusion_fraction: float, seed: int = 0) -> Image.Image:
     rng = random.Random(seed)
     img = image.convert("RGB").copy()
@@ -86,6 +102,9 @@ _CORRUPTION_FUNCS = {
     "jpeg_compression": jpeg_compression,
     "low_brightness": low_brightness,
     "high_brightness": high_brightness,
+    "low_contrast": low_contrast,
+    "high_contrast": high_contrast,
+    "grayscale": grayscale,
     "partial_occlusion": partial_occlusion,
     "partial_crop": partial_crop,
 }

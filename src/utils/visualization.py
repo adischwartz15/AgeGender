@@ -157,6 +157,74 @@ def plot_robustness_curves(df, metric: str, out_path: str | Path) -> Path:
     return _save(fig, out_path)
 
 
+def plot_interval_width_by_bucket(bucket_labels: list[str], mean_widths: np.ndarray, out_path: str | Path) -> Path:
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.bar(bucket_labels, mean_widths, color="tab:orange", alpha=0.85)
+    ax.set_ylabel("Mean q10-q90 interval width (years)")
+    ax.set_title("Prediction interval width by age bucket")
+    plt.setp(ax.get_xticklabels(), rotation=30, ha="right")
+    return _save(fig, out_path)
+
+
+def plot_coverage_width_tradeoff(
+    coverage_before: float, width_before: float, coverage_after: float, width_after: float,
+    target_coverage: float, out_path: str | Path,
+) -> Path:
+    """Scatter of (coverage, mean width) before vs. after conformal calibration.
+
+    Calibration is expected to move the point toward the target coverage
+    line, typically at the cost of a wider interval -- this plot makes
+    that trade-off (not a free improvement) visible.
+    """
+    fig, ax = plt.subplots(figsize=(5.5, 5))
+    ax.scatter([width_before], [coverage_before], s=120, color="tab:red", label="Before calibration", zorder=3)
+    ax.scatter([width_after], [coverage_after], s=120, color="tab:green", label="After calibration", zorder=3)
+    ax.annotate(
+        "", xy=(width_after, coverage_after), xytext=(width_before, coverage_before),
+        arrowprops=dict(arrowstyle="->", color="gray", lw=1.5),
+    )
+    ax.axhline(target_coverage, color="black", linestyle="--", linewidth=1, label=f"target={target_coverage:.2f}")
+    ax.set_xlabel("Mean interval width (years)")
+    ax.set_ylabel("Empirical q10-q90 coverage")
+    ax.set_title("Coverage-width trade-off: before vs. after calibration")
+    ax.legend(fontsize=8)
+    return _save(fig, out_path)
+
+
+def plot_parameter_latency_comparison(
+    labels: list[str], param_counts: list[float], latencies: list[float], out_path: str | Path,
+) -> Path:
+    """Dual-axis bar chart comparing parameter count and per-image latency across experiments/backbones."""
+    fig, ax1 = plt.subplots(figsize=(7, 4.5))
+    x = np.arange(len(labels))
+    width = 0.35
+    ax1.bar(x - width / 2, param_counts, width, color="tab:blue", label="Total parameters")
+    ax1.set_ylabel("Total parameters", color="tab:blue")
+    ax1.tick_params(axis="y", labelcolor="tab:blue")
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+
+    ax2 = ax1.twinx()
+    ax2.bar(x + width / 2, latencies, width, color="tab:orange", label="Latency (ms/image)")
+    ax2.set_ylabel("Inference latency (ms/image)", color="tab:orange")
+    ax2.tick_params(axis="y", labelcolor="tab:orange")
+
+    ax1.set_title("Parameter count vs. inference latency")
+    return _save(fig, out_path)
+
+
+def plot_mean_std_bar(labels: list[str], means: np.ndarray, stds: np.ndarray, metric_name: str, out_path: str | Path) -> Path:
+    """Bar chart with error bars for a mean +/- std metric across seeds/experiments."""
+    fig, ax = plt.subplots(figsize=(6.5, 4.5))
+    x = np.arange(len(labels))
+    ax.bar(x, means, yerr=stds, capsize=4, color="tab:purple", alpha=0.85)
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=30, ha="right", fontsize=8)
+    ax.set_ylabel(metric_name)
+    ax.set_title(f"{metric_name}: mean +/- std across seeds")
+    return _save(fig, out_path)
+
+
 def save_gradcam_overlay(image_rgb: np.ndarray, heatmap: np.ndarray, out_path: str | Path, title: str) -> Path:
     fig, axes = plt.subplots(1, 2, figsize=(7, 3.5))
     axes[0].imshow(image_rgb)

@@ -1,5 +1,13 @@
 #!/usr/bin/env python
-"""CLI: fit split conformal calibration for age intervals using the validation set.
+"""CLI: fit split conformal calibration for age intervals using the dedicated calibration split.
+
+Per the 4-way split protocol (train/validation/calibration/test), this
+intentionally does NOT reuse the validation split (which is reserved for
+early stopping / checkpoint selection) -- fitting conformal intervals on
+the same data used for model/checkpoint selection would let that data
+influence both decisions, muddying the calibration guarantee. The test
+split is only ever used afterward, once, to report the calibration's
+effect (coverage/width before vs. after).
 
 Usage:
     python scripts/calibrate.py --checkpoint checkpoints/multitask_best_balanced_score.pt
@@ -60,14 +68,23 @@ def main() -> int:
         return 1
     df = pd.read_csv(splits_path)
 
-    val_dataset = FaceMultiTaskDataset(df[df["split"] == "val"], EvalTransform(config["dataset"]["image_size"]))
-    q10_val, q90_val, ages_val, mask_val = _predict_age(model, val_dataset, device)
-    if not mask_val.any():
-        logger.error("Validation split has no age labels; cannot calibrate.")
+    calibration_dataset = FaceMultiTaskDataset(
+        df[df["split"] == "calibration"], EvalTransform(config["dataset"]["image_size"])
+    )
+    if len(calibration_dataset) == 0:
+        logger.error(
+            "Calibration split is empty. Re-run 'make prepare-data' with the current "
+            "4-way split config (configs/data.yaml: split.calibration_fraction) if this "
+            "split was prepared before the calibration split existed."
+        )
+        return 1
+    q10_cal, q90_cal, ages_cal, mask_cal = _predict_age(model, calibration_dataset, device)
+    if not mask_cal.any():
+        logger.error("Calibration split has no age labels; cannot calibrate.")
         return 1
 
     calibration_dir = REPO_ROOT / config["calibration"]["output_dir"]
-    artifact = fit_and_save_calibration(ages_val[mask_val], q10_val[mask_val], q90_val[mask_val], alpha, calibration_dir)
+    artifact = fit_and_save_calibration(ages_cal[mask_cal], q10_cal[mask_cal], q90_cal[mask_cal], alpha, calibration_dir)
     logger.info("Calibration artifact: %s", artifact)
 
     test_dataset = FaceMultiTaskDataset(df[df["split"] == "test"], EvalTransform(config["dataset"]["image_size"]))

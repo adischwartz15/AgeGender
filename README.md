@@ -32,6 +32,8 @@ explainability -- built from scratch on a manually implemented ResNet-18.
 - [Grad-CAM explainability](#grad-cam-explainability)
 - [Backend (FastAPI)](#backend-fastapi)
 - [Frontend (React)](#frontend-react)
+- [Demo mode](#demo-mode)
+- [Colab and Kaggle notebooks](#colab-and-kaggle-notebooks)
 - [Example API requests](#example-api-requests)
 - [Evaluation metric definitions](#evaluation-metric-definitions)
 - [Gradient interference and representation similarity](#gradient-interference-and-representation-similarity)
@@ -282,9 +284,20 @@ Runs `scripts/prepare_data.py`: parses raw metadata, drops
 corrupt/unreadable images and duplicate paths/content (SHA-256 hash),
 reports age/gender-label distributions and image-size stats to
 `outputs/data_quality/data_quality_report.json`, and writes a deterministic,
-leakage-checked (subject-level when possible) train/val/test split to
+leakage-checked (subject-level when possible) **four-way** split to
 `data/splits/full_metadata_with_splits.csv`. This split is reused by every
 experiment so results are comparable.
+
+**Split protocol** (`configs/data.yaml: split.*_fraction`, default
+60/15/10/15): each split is used for exactly one purpose, so no data ever
+informs a decision it shouldn't --
+
+| Split | Used for | Never used for |
+|---|---|---|
+| `train` | model fitting (gradient updates) | anything else |
+| `validation` | early stopping + checkpoint selection (`make train`) | fitting conformal intervals, final metrics |
+| `calibration` | fitting split-conformal age intervals (`make calibrate`) | early stopping, final metrics |
+| `test` | final evaluation, touched once per checkpoint | model/checkpoint selection, calibration |
 
 ## Training
 
@@ -365,9 +378,11 @@ make calibrate CHECKPOINT=checkpoints/<your_checkpoint>.pt
 ```
 
 Fits split-conformal calibration (`src/evaluation/calibration.py`) on the
-**validation set only**, saving the offset to
+**dedicated calibration split only** -- deliberately not the validation
+split, which is reserved for early stopping/checkpoint selection, so no
+single split is used for two different decisions. Saves the offset to
 `outputs/calibration/conformal_calibration.json`. Reports coverage/width
-before and after calibration on the test set
+before and after calibration on the test set (touched only here, once)
 (`outputs/calibration/calibration_test_effect.json`). The API and
 `Predictor` only ever describe an interval as "calibrated" when this
 artifact exists and loaded successfully.
@@ -396,12 +411,16 @@ make evaluate CHECKPOINT=checkpoints/<your_checkpoint>.pt
 make robustness CHECKPOINT=checkpoints/<your_checkpoint>.pt
 ```
 
-Evaluates the test set under 8 deterministic corruption types x 3
-severities (`configs/robustness.yaml`, `src/evaluation/robustness.py`):
-Gaussian blur, Gaussian noise, low resolution, JPEG compression, low/high
-brightness, partial occlusion, partial crop. Saves
-`outputs/robustness/robustness_results.csv`, plots, sample corrupted
-images, and a Markdown summary.
+Evaluates the test set (touched only for this, plus final evaluation --
+never for training or model selection) under 11 deterministic corruption
+types x 3 severities (`configs/robustness.yaml`,
+`src/evaluation/robustness.py`): Gaussian blur, Gaussian noise, low
+resolution (resize degradation), JPEG compression, low/high brightness,
+low/high contrast, grayscale conversion, partial occlusion, partial crop.
+For every condition, reports age MAE, gender-label accuracy, abstention
+rate, confidence, and interval width, compared against the clean
+baseline. Saves `outputs/robustness/robustness_results.csv`, plots,
+sample corrupted images, and a Markdown summary.
 
 ## Grad-CAM explainability
 
@@ -466,6 +485,67 @@ Starts the Vite dev server on `:5173` (proxies `/api` to `:8000`, see
 `frontend/vite.config.ts`). Drag-and-drop upload, image preview, privacy
 notice, age/gender/uncertainty/quality/Grad-CAM/kNN-comparison panels, and
 a visible research disclaimer, built with Tailwind CSS.
+
+## Demo mode
+
+A single command for a live course demonstration, instead of starting the
+backend and frontend in two separate terminals:
+
+```bash
+make demo
+```
+
+This first runs a readiness check (`scripts/check_demo_readiness.py`)
+confirming a trained checkpoint and a conformal calibration artifact exist
+(warning, but not blocking, if the optional k-NN index is missing), then
+launches Uvicorn and the Vite dev server together as subprocesses,
+printing both URLs. Ctrl+C stops both. If the readiness check fails, fix
+the reported item (e.g. `make train` then `make calibrate`) or pass
+`--skip-readiness-check` to `python scripts/run_demo.py` to launch anyway.
+
+Five synthetic placeholder "face" images (procedurally drawn with PIL, no
+real person, no dataset content) live in `data/demo_images/` for quick
+upload during a demo -- see `data/demo_images/README.md`. Regenerate them
+with `make demo-images`. Because they're cartoon shapes rather than
+photographs, the classical face detector may decline to predict on some
+of them; that's expected, and itself demonstrates the system's
+decline-rather-than-guess safety behavior described above. For a demo
+that reliably shows a full prediction, upload your own consented photo
+through the frontend instead.
+
+## Colab and Kaggle notebooks
+
+Two polished, self-contained notebooks run the entire research pipeline
+(setup, dependency install, data validation, tests, the controlled
+plain-CNN-vs-Custom-ResNet-18 comparison, calibration, evaluation, optional
+robustness/Grad-CAM/k-NN analyses, multi-seed aggregation, and a final
+report + archive) end to end on a hosted GPU runtime, without needing a
+local machine:
+
+- **`notebooks/train_evaluate_colab.ipynb`** -- for Google Colab. Clones the
+  repo under `/content/AgeGender`, trains under `/content` for speed, and
+  synchronizes checkpoints/metrics/plots/reports to Google Drive after every
+  major phase (never raw dataset images, unless you explicitly enable that).
+  Use this if you want a persistent Drive record across Colab session
+  recycling, or plan to run the notebook over several sessions.
+- **`notebooks/train_evaluate_kaggle.ipynb`** -- for Kaggle Notebooks. Clones
+  the repo under `/kaggle/working/AgeGender`, uses an attached Kaggle input
+  dataset (or the Kaggle API) for data, never mounts Google Drive, and
+  produces a downloadable `AgeGender_<RUN_ID>.zip` under Kaggle's Output tab.
+  Use this if your dataset is already a Kaggle Dataset, or you prefer
+  Kaggle's free GPU quota over Colab's.
+
+Both notebooks are pure orchestration around this repository's real
+`scripts/*.py` -- they never reimplement model, dataset, training, or
+evaluation logic. Each run gets its own timestamped, non-overwriting run
+directory (`config/`, `logs/`, `tests/`, `checkpoints/`, `metrics/`,
+`plots/`, `calibration/`, `reports/`, `manifests/`, `archives/`,
+`experiments/<name>/seed_<seed>/`, ...), is restart-safe (an already-complete
+experiment is reused unless `FORCE_RERUN=True`), and defaults to
+`RUN_PROFILE="core"` (the two-experiment CNN-vs-ResNet comparison, 30 max
+epochs, patience 8, seed 42). See each notebook's first two cells for the
+full configuration options (`RUN_PROFILE`, `SEEDS`, `RUN_ROBUSTNESS`,
+`RUN_GRADCAM`, `RUN_KNN`, `RUN_MULTI_SEED`, etc.).
 
 ## Example API requests
 

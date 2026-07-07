@@ -31,7 +31,7 @@ from src.evaluation.architecture_analysis import (
     compute_gradient_cosine_similarity, compute_representation_similarity, extract_embeddings, reduce_embeddings,
 )
 from src.evaluation.comparison import build_architecture_ablation_table
-from src.evaluation.reports import save_report
+from src.evaluation.reports import discover_experiment_results, save_report
 from src.inference.artifacts import load_model_checkpoint
 from src.utils.config import REPO_ROOT
 from src.utils.io import save_json
@@ -55,11 +55,13 @@ def main() -> int:
         logger.error("No prepared split found at %s.", splits_path)
         return 1
     df = pd.read_csv(splits_path)
-    val_dataset = FaceMultiTaskDataset(df[df["split"] == "val"], EvalTransform(config["dataset"]["image_size"]))
+    # The validation split (not calibration/test) is used here since this is
+    # exploratory representation/gradient analysis, not a reported final metric.
+    validation_dataset = FaceMultiTaskDataset(df[df["split"] == "validation"], EvalTransform(config["dataset"]["image_size"]))
 
     from torch.utils.data import DataLoader
 
-    loader = DataLoader(val_dataset, batch_size=32, shuffle=True)
+    loader = DataLoader(validation_dataset, batch_size=32, shuffle=True)
 
     output_dir = REPO_ROOT / "outputs" / "architecture_analysis"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -121,18 +123,7 @@ def main() -> int:
     # (via scripts/evaluate.py:evaluate_checkpoint) -- all three are merged here
     # so the ablation table has real performance numbers, not just parameter counts.
     metrics_dir = REPO_ROOT / "outputs" / "metrics"
-    experiment_results = {}
-    for param_file in metrics_dir.glob("*_parameter_breakdown.json"):
-        exp_name = param_file.name.replace("_parameter_breakdown.json", "")
-        import json
-
-        with open(param_file) as fh:
-            breakdown = json.load(fh)
-        timing_file = metrics_dir / f"{exp_name}_timing.json"
-        timing = json.load(open(timing_file)) if timing_file.exists() else {}
-        test_metrics_file = metrics_dir / f"{exp_name}_test_metrics.json"
-        test_metrics = json.load(open(test_metrics_file)) if test_metrics_file.exists() else {}
-        experiment_results[exp_name] = {"parameter_breakdown": breakdown, "test_metrics": test_metrics, **timing}
+    experiment_results = discover_experiment_results(metrics_dir)
     if experiment_results:
         table = build_architecture_ablation_table(experiment_results)
         table.to_csv(output_dir / "ablation_table.csv", index=False)

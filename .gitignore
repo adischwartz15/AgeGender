@@ -44,9 +44,11 @@ Thumbs.db
 .idea/
 .claude/
 
-# Auto-generated report (produced by scripts/generate_architecture_report.py
-# or scripts/export_report.py from outputs/ artifacts -- not source)
+# Auto-generated reports (produced by scripts/generate_architecture_report.py,
+# scripts/generate_final_report.py, or scripts/export_report.py from outputs/
+# artifacts -- not source)
 docs/architecture_analysis_generated.md
+docs/final_results_report.md
 
 # Logs
 *.log

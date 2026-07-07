@@ -62,9 +62,16 @@ def test_validate_dataset_drops_duplicate_hashes(synthetic_metadata_df, tmp_path
 
 
 def test_split_dataframe_respects_fractions(synthetic_metadata_df):
-    df = split_dataframe(synthetic_metadata_df, 0.6, 0.2, 0.2, seed=42, subject_level_if_available=False)
+    df = split_dataframe(synthetic_metadata_df, 0.5, 0.2, 0.1, 0.2, seed=42, subject_level_if_available=False)
     counts = df["split"].value_counts(normalize=True)
-    assert abs(counts.get("train", 0) - 0.6) < 0.15
+    assert abs(counts.get("train", 0) - 0.5) < 0.15
+
+
+def test_split_dataframe_produces_all_four_splits(synthetic_metadata_df):
+    df = split_dataframe(synthetic_metadata_df, 0.4, 0.2, 0.2, 0.2, seed=3, subject_level_if_available=False)
+    assert set(df["split"].unique()) <= {"train", "validation", "calibration", "test"}
+    # With a reasonably sized synthetic set and non-trivial fractions, expect all four present.
+    assert set(df["split"].unique()) == {"train", "validation", "calibration", "test"}
 
 
 def test_split_dataframe_deterministic_with_seed(synthetic_metadata_df):
@@ -98,9 +105,12 @@ def test_assert_no_leakage_raises_on_duplicated_path_across_splits(synthetic_met
 def test_validate_and_split_end_to_end(synthetic_metadata_df):
     data_config = {
         "validation": {"min_image_size": 8, "max_file_size_mb": 20},
-        "split": {"train_fraction": 0.7, "val_fraction": 0.15, "test_fraction": 0.15, "seed": 0, "subject_level_if_available": True},
+        "split": {
+            "train_fraction": 0.6, "validation_fraction": 0.15, "calibration_fraction": 0.10,
+            "test_fraction": 0.15, "seed": 0, "subject_level_if_available": True,
+        },
     }
     split_df, report = validate_and_split(synthetic_metadata_df, data_config)
-    assert set(split_df["split"].unique()) <= {"train", "val", "test"}
+    assert set(split_df["split"].unique()) <= {"train", "validation", "calibration", "test"}
     assert "age_distribution" in report
     assert "gender_label_distribution" in report

@@ -26,7 +26,9 @@ api:
   # model, since the model is trained on tightly face-cropped images
   # (e.g. UTKFace) and an arbitrary uploaded photo otherwise includes a
   # lot of background/clothing/context the model never saw in training.
-  # When no face is found, the full image is used and a warning is
-  # returned instead of silently proceeding as if a crop was applied.
+  # When no face is found, age/gender/Grad-CAM predictions are declined
+  # entirely (age=None, gender=None, gradcam=None) rather than run on a
+  # non-face image, since the model is only meaningful on face crops
+  # similar to its training data -- see src/inference/predictor.py.
   enable_face_detection: true
   face_margin_ratio: 0.35

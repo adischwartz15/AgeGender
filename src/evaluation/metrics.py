@@ -40,8 +40,20 @@ def expected_calibration_error_intervals(y_true: np.ndarray, q_low: np.ndarray, 
     return float(abs(empirical - target_coverage))
 
 
-def age_error_by_bucket(y_true: np.ndarray, y_pred: np.ndarray, bucket_edges: list[int] | None = None) -> dict[str, dict]:
-    """Mean absolute error grouped into age buckets, e.g. 0-10, 10-20, ..."""
+
+
+def age_uncertainty_by_bucket(
+    y_true: np.ndarray, q10: np.ndarray, q50: np.ndarray, q90: np.ndarray,
+    bucket_edges: list[int] | None = None,
+) -> dict[str, dict]:
+    """Per-age-bucket MAE, q10-q90 coverage, and interval width.
+
+    Used for the uncertainty evaluation plots (coverage by bucket, width
+    by bucket): a model can look well-calibrated on average while
+    over/under-covering specific age ranges, which a single global
+    coverage number hides. Buckets with zero samples report ``None`` for
+    every metric rather than a fabricated value.
+    """
     if bucket_edges is None:
         bucket_edges = [0, 10, 20, 30, 40, 50, 60, 70, 80, 200]
     result = {}
@@ -49,13 +61,46 @@ def age_error_by_bucket(y_true: np.ndarray, y_pred: np.ndarray, bucket_edges: li
         mask = (y_true >= lo) & (y_true < hi)
         label = f"{lo}-{hi if hi < 200 else '120+'}"
         if mask.sum() == 0:
-            result[label] = {"count": 0, "mae": None, "coverage": None}
+            result[label] = {"count": 0, "mae": None, "coverage": None, "mean_width": None, "median_width": None}
         else:
             result[label] = {
                 "count": int(mask.sum()),
-                "mae": age_mae(y_true[mask], y_pred[mask]),
+                "mae": age_mae(y_true[mask], q50[mask]),
+                "coverage": interval_coverage(y_true[mask], q10[mask], q90[mask]),
+                "mean_width": mean_interval_width(q10[mask], q90[mask]),
+                "median_width": median_interval_width(q10[mask], q90[mask]),
             }
     return result
+
+
+def select_interval_examples(
+    image_paths: np.ndarray, y_true: np.ndarray, q10: np.ndarray, q50: np.ndarray, q90: np.ndarray, k: int = 5,
+) -> dict[str, list[dict]]:
+    """Select the ``k`` narrowest and ``k`` widest q10-q90 intervals in a test set.
+
+    Returns real per-sample records (image path, true age, q10/q50/q90,
+    width) for the report's "examples of narrow and wide prediction
+    intervals" section -- never synthesized examples. Actual image files
+    are not embedded in the report (they may be private/licensed
+    dataset images); only their paths and the model's own outputs are
+    listed.
+    """
+    width = q90 - q10
+    order = np.argsort(width)
+
+    def _record(i: int) -> dict:
+        return {
+            "image_path": str(image_paths[i]),
+            "true_age": float(y_true[i]),
+            "q10": float(q10[i]), "q50": float(q50[i]), "q90": float(q90[i]),
+            "width": float(width[i]),
+        }
+
+    n = len(width)
+    k = min(k, n)
+    narrowest = [_record(i) for i in order[:k]]
+    widest = [_record(i) for i in order[::-1][:k]]
+    return {"narrowest": narrowest, "widest": widest}
 
 
 def gender_accuracy(y_true: np.ndarray, y_pred: np.ndarray, abstain_mask: np.ndarray | None = None) -> float:

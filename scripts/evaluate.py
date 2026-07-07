@@ -2,8 +2,10 @@
 """CLI: evaluate a trained checkpoint on the held-out test split.
 
 Computes age MAE/RMSE/R2, interval coverage/width, calibration error,
-per-age-bucket error, and dataset gender-label accuracy/confusion
-matrix/abstention rate. Optionally compares against a k-NN baseline.
+per-age-bucket uncertainty metrics (MAE/coverage/width, before and after
+conformal calibration when available), narrow/wide interval examples, and
+dataset gender-label accuracy/confusion matrix/abstention rate. Optionally
+compares against a k-NN baseline.
 
 Usage:
     python scripts/evaluate.py --checkpoint checkpoints/multitask_best_balanced_score.pt [--compare-knn]
@@ -28,15 +30,18 @@ from src.evaluation.calibration import apply_conformal_offset, load_calibration
 from src.evaluation.comparison import build_parametric_vs_knn_table
 from src.evaluation.knn_baseline import KNNEmbeddingBaseline
 from src.evaluation.metrics import (
-    abstention_rate, age_error_by_bucket, age_mae, age_r2, age_rmse, confidence_statistics,
+    abstention_rate, age_mae, age_r2, age_rmse, age_uncertainty_by_bucket, confidence_statistics,
     confusion_matrix, expected_calibration_error_intervals, gender_accuracy, interval_coverage,
-    mean_interval_width, median_interval_width,
+    mean_interval_width, median_interval_width, select_interval_examples,
 )
 from src.inference.artifacts import load_model_checkpoint
 from src.utils.config import REPO_ROOT
 from src.utils.io import save_json
 from src.utils.logging import get_logger
-from src.utils.visualization import plot_age_scatter, plot_confusion_matrix, plot_error_histogram, plot_interval_coverage
+from src.utils.visualization import (
+    plot_age_scatter, plot_confusion_matrix, plot_coverage_width_tradeoff, plot_error_histogram,
+    plot_interval_coverage, plot_interval_width_by_bucket,
+)
 
 logger = get_logger("scripts.evaluate")
 
@@ -87,12 +92,15 @@ def compute_parametric_metrics(preds: dict, confidence_threshold: float, calibra
             "mean_interval_width": mean_interval_width(q10, q90),
             "median_interval_width": median_interval_width(q10, q90),
             "calibration_error": expected_calibration_error_intervals(y_true, q10, q90, target_coverage=0.80),
-            "age_error_by_bucket": age_error_by_bucket(y_true, q50),
+            # Per-bucket MAE/coverage/width -- a single global coverage number
+            # can hide age ranges where the model over/under-covers.
+            "age_metrics_by_bucket": age_uncertainty_by_bucket(y_true, q10, q50, q90),
         })
         if calibration is not None:
             q10_cal, q90_cal = apply_conformal_offset(q10, q90, calibration["offset"])
             metrics["interval_coverage_calibrated"] = interval_coverage(y_true, q10_cal, q90_cal)
             metrics["mean_interval_width_calibrated"] = mean_interval_width(q10_cal, q90_cal)
+            metrics["age_metrics_by_bucket_calibrated"] = age_uncertainty_by_bucket(y_true, q10_cal, q50, q90_cal)
 
     if gender_mask.any():
         probs = preds["probs"][gender_mask]
@@ -145,26 +153,36 @@ def evaluate_checkpoint(
     metrics_dir, plots_dir = output_dir / "metrics", output_dir / "plots"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
-    save_json(metrics, metrics_dir / f"{output_name}.json")
 
     age_mask = preds["age_mask"].astype(bool)
     if age_mask.any():
-        y_true, q50 = preds["age"][age_mask], preds["q50"][age_mask]
+        y_true, q10, q50, q90 = (
+            preds["age"][age_mask], preds["q10"][age_mask], preds["q50"][age_mask], preds["q90"][age_mask],
+        )
         plot_age_scatter(y_true, q50, plots_dir / f"{output_name}_age_scatter.png")
         plot_error_histogram(y_true - q50, plots_dir / f"{output_name}_age_error_hist.png")
-        bucket_report = metrics["age_error_by_bucket"]
+
+        bucket_report = metrics["age_metrics_by_bucket"]
         labels = [k for k, v in bucket_report.items() if v["count"] > 0]
         if labels:
-            coverage_by_bucket = np.array([
-                interval_coverage(
-                    y_true[(y_true >= _bucket_lo(k)) & (y_true < _bucket_hi(k))],
-                    preds["q10"][age_mask][(y_true >= _bucket_lo(k)) & (y_true < _bucket_hi(k))],
-                    preds["q90"][age_mask][(y_true >= _bucket_lo(k)) & (y_true < _bucket_hi(k))],
-                )
-                if ((y_true >= _bucket_lo(k)) & (y_true < _bucket_hi(k))).sum() > 0 else np.nan
-                for k in labels
-            ])
+            coverage_by_bucket = np.array([bucket_report[k]["coverage"] for k in labels])
+            width_by_bucket = np.array([bucket_report[k]["mean_width"] for k in labels])
             plot_interval_coverage(labels, coverage_by_bucket, 0.80, plots_dir / f"{output_name}_interval_coverage.png")
+            plot_interval_width_by_bucket(labels, width_by_bucket, plots_dir / f"{output_name}_interval_width_by_bucket.png")
+
+        if calibration is not None and "age_metrics_by_bucket_calibrated" in metrics:
+            plot_coverage_width_tradeoff(
+                coverage_before=metrics["interval_coverage"],
+                width_before=metrics["mean_interval_width"],
+                coverage_after=metrics["interval_coverage_calibrated"],
+                width_after=metrics["mean_interval_width_calibrated"],
+                target_coverage=0.80,
+                out_path=plots_dir / f"{output_name}_coverage_width_tradeoff.png",
+            )
+
+        if "image_path" in test_df.columns:
+            image_paths = test_df["image_path"].to_numpy()[age_mask]
+            metrics["interval_examples"] = select_interval_examples(image_paths, y_true, q10, q50, q90)
 
     gender_mask = preds["gender_mask"].astype(bool)
     if gender_mask.any():
@@ -184,6 +202,7 @@ def evaluate_checkpoint(
             table.to_csv(REPO_ROOT / "outputs" / "knn" / "parametric_vs_knn.csv", index=False)
             logger.info("Saved parametric-vs-kNN comparison table")
 
+    save_json(metrics, metrics_dir / f"{output_name}.json")
     logger.info("Evaluation metrics: %s", {k: v for k, v in metrics.items() if not isinstance(v, dict)})
     return metrics
 
@@ -221,15 +240,6 @@ def main() -> int:
         args.checkpoint, output_name, args.compare_knn, args.knn_path, args.calibration_dir
     )
     return 0 if metrics is not None else 1
-
-
-def _bucket_lo(label: str) -> float:
-    return float(label.split("-")[0])
-
-
-def _bucket_hi(label: str) -> float:
-    part = label.split("-")[1]
-    return 1000.0 if part == "120+" else float(part)
 
 
 @torch.no_grad()

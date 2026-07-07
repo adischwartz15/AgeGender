@@ -65,9 +65,16 @@ class SimCLRPretrainDataset(Dataset):
 
 
 def build_datasets(df: pd.DataFrame, train_transform, eval_transform) -> dict[str, FaceMultiTaskDataset]:
-    """Split a full metadata DataFrame (with a ``split`` column) into three datasets."""
+    """Split a full metadata DataFrame (with a ``split`` column) into the four datasets.
+
+    Keys match the split protocol exactly: ``train`` (model fitting),
+    ``validation`` (early stopping / checkpoint selection only),
+    ``calibration`` (fitting conformal intervals only), ``test`` (final
+    evaluation only). See ``src/data/split_utils.py``.
+    """
     datasets = {}
-    for split_name, transform in (("train", train_transform), ("val", eval_transform), ("test", eval_transform)):
+    for split_name in ("train", "validation", "calibration", "test"):
+        transform = train_transform if split_name == "train" else eval_transform
         subset = df[df["split"] == split_name]
         datasets[split_name] = FaceMultiTaskDataset(subset, transform)
     return datasets

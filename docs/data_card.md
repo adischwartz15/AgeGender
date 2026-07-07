@@ -53,8 +53,18 @@ any training:
 1. Verifies every image path is readable and above a minimum resolution; drops corrupt/unreadable files.
 2. Detects and removes duplicate file paths and duplicate image content (via SHA-256 hash).
 3. Reports age distribution, gender-label distribution, and image-size statistics to `outputs/data_quality/data_quality_report.json`.
-4. Splits into train/val/test with a fixed seed; splits at the **subject level** (not just image level) when a `subject_id` column is available, so the same person never appears in more than one split.
+4. Splits into **train / validation / calibration / test** (default fractions 60/15/10/15, `configs/data.yaml: split.*_fraction`) with a fixed seed; splits at the **subject level** (not just image level) when a `subject_id` column is available, so the same person never appears in more than one split.
 5. Asserts no image path or subject_id spans multiple splits before writing `data/splits/full_metadata_with_splits.csv`.
+
+Each of the four splits has exactly one job: `train` fits the model;
+`validation` is read only for early stopping and checkpoint selection
+(`scripts/train.py`); `calibration` is read only when fitting conformal
+prediction intervals (`scripts/calibrate.py`); `test` is read only for
+final, one-time evaluation (`scripts/evaluate.py`,
+`scripts/run_robustness.py`, etc.). No split is ever used for more than
+one of these roles -- in particular, calibration is **not** fit on the
+validation split, since that would let the same data influence both
+checkpoint selection and the calibration guarantee.
 
 ## Demographic coverage caveat
 

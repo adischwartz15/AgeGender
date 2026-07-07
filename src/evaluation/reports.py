@@ -98,7 +98,27 @@ def _backbone_comparison_interpretation(cnn_metrics: dict, resnet_metrics: dict)
     )
 
 
-def _build_backbone_comparison_section(outputs_dir: Path) -> str:
+def discover_experiment_results(metrics_dir: str | Path) -> dict[str, dict]:
+    """Scan ``outputs/metrics`` for per-experiment artifacts and merge them.
+
+    For each ``{experiment}_parameter_breakdown.json`` found, merges in the
+    matching ``_timing.json`` and ``_test_metrics.json`` (both optional) into
+    the shape ``build_architecture_ablation_table`` expects. Shared by both
+    ``generate_architecture_report.py`` and ``generate_final_report.py`` so
+    the two reports never disagree about which experiments have real results.
+    """
+    metrics_dir = Path(metrics_dir)
+    results: dict[str, dict] = {}
+    for param_file in metrics_dir.glob("*_parameter_breakdown.json"):
+        exp_name = param_file.name.replace("_parameter_breakdown.json", "")
+        breakdown = _read_json(param_file) or {}
+        timing = _read_json(metrics_dir / f"{exp_name}_timing.json") or {}
+        test_metrics = _read_json(metrics_dir / f"{exp_name}_test_metrics.json") or {}
+        results[exp_name] = {"parameter_breakdown": breakdown, "test_metrics": test_metrics, **timing}
+    return results
+
+
+def build_backbone_comparison_section(outputs_dir: Path) -> str:
     lines = ["## Plain CNN vs Custom ResNet-18 Backbone Comparison\n"]
     lines.append(
         "Controlled comparison isolating the residual backbone's contribution: "
@@ -189,7 +209,7 @@ def generate_markdown_report(outputs_dir: str | Path) -> str:
         sections.append(_MISSING.format(cmd="make build-knn && make evaluate") + "\n")
 
     # Plain CNN vs Custom ResNet-18 backbone comparison
-    sections.append(_build_backbone_comparison_section(outputs_dir))
+    sections.append(build_backbone_comparison_section(outputs_dir))
 
     # Gradient interference
     sections.append("## Gradient Interference (Task-Gradient Cosine Similarity)\n")

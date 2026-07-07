@@ -13,7 +13,9 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from src.evaluation.comparison import build_architecture_ablation_table
+from src.evaluation.comparison import (
+    aggregate_seed_metrics, build_architecture_ablation_table, build_seed_aggregate_table,
+)
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -84,3 +86,43 @@ def test_default_output_name_strips_best_checkpoint_suffix():
 
 def test_default_output_name_falls_back_when_no_known_suffix():
     assert _default_output_name("checkpoints/some_custom_checkpoint.pt") == "some_custom_checkpoint_test_metrics"
+
+
+def test_aggregate_seed_metrics_computes_mean_and_std():
+    per_seed = [
+        {"age_mae": 5.0, "gender_accuracy": 0.90},
+        {"age_mae": 6.0, "gender_accuracy": 0.92},
+        {"age_mae": 7.0, "gender_accuracy": 0.94},
+    ]
+    agg = aggregate_seed_metrics(per_seed)
+    assert agg["age_mae"]["mean"] == 6.0
+    assert agg["age_mae"]["n_seeds"] == 3
+    assert agg["age_mae"]["std"] is not None and agg["age_mae"]["std"] > 0
+    assert agg["_n_seed_runs"] == 3
+
+
+def test_aggregate_seed_metrics_std_is_none_with_single_seed():
+    agg = aggregate_seed_metrics([{"age_mae": 5.0}])
+    assert agg["age_mae"]["mean"] == 5.0
+    assert agg["age_mae"]["std"] is None
+    assert agg["age_mae"]["n_seeds"] == 1
+
+
+def test_aggregate_seed_metrics_skips_missing_values_per_key():
+    per_seed = [{"age_mae": 5.0, "gender_accuracy": 0.9}, {"age_mae": 6.0}]  # gender_accuracy missing in 2nd seed
+    agg = aggregate_seed_metrics(per_seed)
+    assert agg["age_mae"]["n_seeds"] == 2
+    assert agg["gender_accuracy"]["n_seeds"] == 1
+    assert agg["gender_accuracy"]["std"] is None
+
+
+def test_build_seed_aggregate_table_formats_mean_and_std():
+    aggregates = {
+        "exp_c_shared_adapters": aggregate_seed_metrics([{"age_mae": 5.0}, {"age_mae": 7.0}]),
+        "exp_d_shared_adapters_learned_balance": aggregate_seed_metrics([{"age_mae": 4.0}]),
+    }
+    table = build_seed_aggregate_table(aggregates)
+    row_c = table[table["experiment"] == "exp_c_shared_adapters"].iloc[0]
+    row_d = table[table["experiment"] == "exp_d_shared_adapters_learned_balance"].iloc[0]
+    assert "+/-" in row_c["age_mae"]
+    assert "no std" in row_d["age_mae"]

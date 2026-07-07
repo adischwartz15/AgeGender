@@ -21,10 +21,12 @@ Determinism caveats:
 
 ## Splits are fixed once, reused everywhere
 
-`scripts/prepare_data.py` writes a single `data/splits/full_metadata_with_splits.csv`.
-Every experiment in `configs/experiments.yaml` reads this same file, so
-Experiments A-F are comparable: differences in results reflect the
-architecture/training change under test, not a different data split.
+`scripts/prepare_data.py` writes a single `data/splits/full_metadata_with_splits.csv`
+with four splits -- `train` / `validation` / `calibration` / `test`, each
+used for exactly one purpose (see `docs/data_card.md`). Every experiment
+in `configs/experiments.yaml` reads this same file, so Experiments 0, A-F
+are comparable: differences in results reflect the architecture/training
+change under test, not a different data split.
 
 ## Config-driven, not hardcoded
 
@@ -76,96 +78,36 @@ values for your run are recorded by the trainer and reported in
 
 ## Running on Kaggle Notebooks / Google Colab
 
-A ready-to-run Colab notebook implementing everything in this section --
-Drive mounting, credential prompts, and a Drive-sync helper called after
-every pipeline stage so checkpoints/outputs survive session recycling --
-is provided at `notebooks/face_multitask_research_colab.ipynb`. Upload it
-to https://colab.research.google.com (File -> Upload notebook) or open it
-directly from GitHub once you've pushed this repo there.
+Two ready-to-run notebooks implement the full pipeline described in this
+document -- environment/GPU checks, repository setup, dependency
+installation, data validation and split preparation, automated tests, the
+controlled plain-CNN-vs-Custom-ResNet-18 comparison, calibration,
+evaluation, optional robustness/Grad-CAM/k-NN analyses, multi-seed
+aggregation, and a final report + archive:
+
+- `notebooks/train_evaluate_colab.ipynb` -- Google Colab. Trains under
+  `/content` for speed and synchronizes checkpoints/metrics/plots/reports
+  to Google Drive after every major phase.
+- `notebooks/train_evaluate_kaggle.ipynb` -- Kaggle Notebooks. Uses an
+  attached Kaggle input dataset (or the Kaggle API), never mounts Google
+  Drive, and produces a downloadable zip archive under Kaggle's Output tab.
+
+See the root `README.md`'s "Colab and Kaggle notebooks" section for which
+one to use. Both are pure orchestration around this repository's real
+`scripts/*.py` -- they never reimplement model, dataset, training, or
+evaluation logic, use a readable generated run ID
+(`<date>_<time>_<profile>_seed<seed>`), never overwrite an existing run
+directory, and are restart-safe (an already-complete experiment/seed is
+reused unless `FORCE_RERUN=True`).
 
 The training/evaluation pipeline (`scripts/*.py`) is plain Python and has
 no dependency on the FastAPI backend or the React frontend, so it runs
-fine in a hosted notebook with a free GPU. The frontend is not needed to
-reproduce any research result -- skip it entirely on Kaggle/Colab and just
-inspect `outputs/plots/`, `outputs/gradcam/`, etc. as images in the
-notebook.
+fine in a hosted notebook with a free GPU. The frontend build is checked
+(`RUN_FRONTEND_CHECKS=True`) but its dev server is never launched by
+either notebook -- that's not needed to reproduce any research result.
 
-### Getting the code onto the notebook
-
-Neither platform can see your local disk directly. Easiest options,
-in order of preference:
-1. Push this repo to a GitHub repo (public or private), then
-   `!git clone <your-repo-url>` in a notebook cell.
-2. Zip the repo locally and use Colab's `files.upload()` (Colab) or
-   "Add Data" -> upload a dataset from the zip (Kaggle), then unzip.
-
-### Google Colab
-
-```python
-# Cell 1: get the code (pick one)
-!git clone https://github.com/<you>/face-multitask-research.git
-%cd face-multitask-research
-
-# Cell 2: install dependencies (torch is already preinstalled on Colab
-# GPU runtimes, so this mostly adds project-specific packages)
-!pip install -r requirements.txt
-
-# Cell 3: Kaggle credentials for scripts/download_kaggle_data.py -- set as
-# environment variables directly rather than writing a kaggle.json file
-# that could end up committed by accident.
-import os
-os.environ["KAGGLE_USERNAME"] = "<your-username>"
-os.environ["KAGGLE_KEY"] = "<your-key>"
-os.environ["KAGGLE_DATASET_SLUG"] = "jangedoo/utkface-new"  # or your dataset
-
-!python scripts/download_kaggle_data.py
-!python scripts/prepare_data.py
-!python scripts/train.py           # Runtime -> Change runtime type -> GPU first
-!python scripts/calibrate.py --checkpoint checkpoints/multitask_best_balanced_score.pt
-!python scripts/build_knn_index.py --checkpoint checkpoints/multitask_best_balanced_score.pt
-!python scripts/evaluate.py --checkpoint checkpoints/multitask_best_balanced_score.pt --compare-knn
-!python scripts/run_robustness.py --checkpoint checkpoints/multitask_best_balanced_score.pt
-!python scripts/generate_gradcam.py --checkpoint checkpoints/multitask_best_balanced_score.pt
-!python scripts/generate_architecture_report.py --checkpoint checkpoints/multitask_best_balanced_score.pt
-```
-
-To view a generated plot inline: `from IPython.display import Image; Image("outputs/plots/multitask_training_curves.png")`.
-
-If you want to expose the FastAPI backend from Colab for a quick demo
-(optional, not needed for research results), tunnel it with a tool such as
-`ngrok` or Colab's own port-forwarding rather than running the frontend
-dev server there.
-
-### Kaggle Notebooks
-
-Kaggle Notebooks are more locked down (limited/no outbound internet by
-default) but if you're already working with a Kaggle-hosted dataset, you
-don't need the Kaggle API at all -- attach the dataset via **Add Data** in
-the notebook UI, which mounts it read-only at `/kaggle/input/<dataset-slug>/`.
-
-1. Add this code as a Kaggle Dataset (upload the zipped repo) or a Kaggle
-   Notebook "Utility Script", then add it as an input to a new notebook.
-2. Add your target dataset (e.g. UTKFace) via **Add Data** as well.
-3. Enable a GPU accelerator in the notebook's Settings panel.
-4. Point the config at the mounted dataset instead of downloading via the
-   Kaggle API:
-   ```python
-   !pip install -r /kaggle/input/face-multitask-research/requirements.txt
-   %cd /kaggle/working
-   !cp -r /kaggle/input/face-multitask-research/* .
-   !python scripts/prepare_data.py --set dataset.image_root=/kaggle/input/utkface-new/UTKFace
-   !python scripts/train.py --set paths.checkpoint_dir=/kaggle/working/checkpoints --set paths.output_dir=/kaggle/working/outputs
-   ```
-   (adjust the input path to match whatever folder name Kaggle mounts your
-   attached dataset under -- check the notebook's Data pane).
-5. `scripts/download_kaggle_data.py` and the `KAGGLE_*` environment
-   variables are only needed if you instead want to fetch a dataset via
-   the Kaggle API from within the notebook (requires internet access
-   enabled in notebook settings, plus your own API token set as Colab-style
-   environment variables or Kaggle "Secrets").
-
-Either platform will hit the free-tier session/GPU time limits before a
-large multi-experiment `run_experiments.py` sweep finishes -- checkpoint
-after each stage (already done automatically by the trainer) and resume
-by re-running individual experiments rather than the whole sweep in one
-session.
+Either platform will hit free-tier session/GPU time limits before a large
+multi-experiment sweep finishes; both notebooks are restart-safe for
+exactly this reason -- re-run the notebook (optionally setting
+`RESUME_RUN_ID` to the previous run's printed ID) and already-complete
+experiments are skipped rather than retrained.

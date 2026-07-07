@@ -16,11 +16,11 @@ from src.training.trainer import Trainer
 
 
 def test_smoke_training_runs_and_saves_checkpoints(tmp_path, synthetic_metadata_df, tiny_config):
-    df = split_dataframe(synthetic_metadata_df, 0.6, 0.2, 0.2, seed=0, subject_level_if_available=False)
+    df = split_dataframe(synthetic_metadata_df, 0.5, 0.2, 0.1, 0.2, seed=0, subject_level_if_available=False)
 
     image_size = tiny_config["dataset"]["image_size"]
     train_dataset = FaceMultiTaskDataset(df[df["split"] == "train"], TrainTransform(image_size))
-    val_dataset = FaceMultiTaskDataset(df[df["split"] == "val"], EvalTransform(image_size))
+    val_dataset = FaceMultiTaskDataset(df[df["split"] == "validation"], EvalTransform(image_size))
 
     model = build_multitask_model(tiny_config)
     checkpoint_dir = tmp_path / "checkpoints"
@@ -44,10 +44,10 @@ def test_smoke_training_with_simple_cnn_backbone(tmp_path, synthetic_metadata_df
     tiny_config["model"]["backbone"]["name"] = "simple_cnn"
     tiny_config["model"]["loss_balancing"]["mode"] = "learned_uncertainty"
 
-    df = split_dataframe(synthetic_metadata_df, 0.6, 0.2, 0.2, seed=2, subject_level_if_available=False)
+    df = split_dataframe(synthetic_metadata_df, 0.5, 0.2, 0.1, 0.2, seed=2, subject_level_if_available=False)
     image_size = tiny_config["dataset"]["image_size"]
     train_dataset = FaceMultiTaskDataset(df[df["split"] == "train"], TrainTransform(image_size))
-    val_dataset = FaceMultiTaskDataset(df[df["split"] == "val"], EvalTransform(image_size))
+    val_dataset = FaceMultiTaskDataset(df[df["split"] == "validation"], EvalTransform(image_size))
 
     model = build_multitask_model(tiny_config)
     from src.models.simple_cnn import SimpleCNNBackbone
@@ -70,11 +70,11 @@ def test_smoke_training_with_missing_gender_labels(tmp_path, synthetic_metadata_
     """Some samples have age-only labels; masked loss must not crash or NaN."""
     df = synthetic_metadata_df.copy()
     df.loc[df.index[::3], "gender_label"] = float("nan")
-    df = split_dataframe(df, 0.6, 0.2, 0.2, seed=1, subject_level_if_available=False)
+    df = split_dataframe(df, 0.5, 0.2, 0.1, 0.2, seed=1, subject_level_if_available=False)
 
     image_size = tiny_config["dataset"]["image_size"]
     train_dataset = FaceMultiTaskDataset(df[df["split"] == "train"], TrainTransform(image_size))
-    val_dataset = FaceMultiTaskDataset(df[df["split"] == "val"], EvalTransform(image_size))
+    val_dataset = FaceMultiTaskDataset(df[df["split"] == "validation"], EvalTransform(image_size))
 
     model = build_multitask_model(tiny_config)
     trainer = Trainer(

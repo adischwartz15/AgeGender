@@ -31,9 +31,16 @@ dataset:
   age_min: 0
   age_max: 120
 
+# Four-way split, each used for exactly one purpose:
+#   train        -> model fitting
+#   validation   -> early stopping + checkpoint selection only
+#   calibration  -> fitting split-conformal age intervals only (never used
+#                   for early stopping or final evaluation)
+#   test         -> final evaluation only, touched once per checkpoint
 split:
-  train_fraction: 0.7
-  val_fraction: 0.15
+  train_fraction: 0.60
+  validation_fraction: 0.15
+  calibration_fraction: 0.10
   test_fraction: 0.15
   seed: 42
   subject_level_if_available: true

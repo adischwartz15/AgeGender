@@ -10,7 +10,7 @@ from __future__ import annotations
 from src.evaluation.comparison import build_backbone_comparison_table
 from src.evaluation.reports import (
     _CNN_EXPERIMENT, _RESNET_EXPERIMENT, _backbone_comparison_interpretation,
-    _build_backbone_comparison_section, generate_markdown_report,
+    build_backbone_comparison_section, generate_markdown_report,
 )
 from src.utils.io import save_json
 
@@ -65,7 +65,7 @@ def test_backbone_comparison_interpretation_missing_data_is_honest():
 
 
 def test_backbone_comparison_section_reports_unavailable_when_no_artifacts(tmp_path):
-    section = _build_backbone_comparison_section(tmp_path)
+    section = build_backbone_comparison_section(tmp_path)
     assert "## Plain CNN vs Custom ResNet-18 Backbone Comparison" in section
     assert "Results unavailable" in section
     assert _CNN_EXPERIMENT in section
@@ -78,7 +78,7 @@ def test_backbone_comparison_section_renders_table_when_both_present(tmp_path):
     save_json(_cnn_metrics(), metrics_dir / f"{_CNN_EXPERIMENT}_parameter_breakdown.json")
     save_json(_resnet_metrics(), metrics_dir / f"{_RESNET_EXPERIMENT}_parameter_breakdown.json")
 
-    section = _build_backbone_comparison_section(tmp_path)
+    section = build_backbone_comparison_section(tmp_path)
     assert "Results unavailable" not in section
     assert "simple_cnn" in section
     assert "custom_resnet18" in section

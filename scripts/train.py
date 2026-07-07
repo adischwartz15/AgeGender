@@ -55,7 +55,7 @@ def run_training(config: dict, experiment_name: str) -> dict:
     model = build_multitask_model(config)
     checkpoint_dir = REPO_ROOT / config["paths"]["checkpoint_dir"]
     trainer = Trainer(
-        model, config, datasets["train"], datasets["val"], device=device,
+        model, config, datasets["train"], datasets["validation"], device=device,
         checkpoint_dir=checkpoint_dir, experiment_name=experiment_name,
         gender_class_weights=gender_class_weights,
     )

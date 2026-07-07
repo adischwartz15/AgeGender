@@ -2,7 +2,8 @@
 """CLI: generate Grad-CAM "model attention visualization" overlays for sample images.
 
 Produces overlays for correct predictions, incorrect predictions,
-low-confidence examples, and (if present) blurry / partial /
+low-confidence examples, the single widest-age-interval example (i.e. the
+sample the model is least certain about), and (if present) blurry / partial /
 robustness-corrupted images, saved to outputs/gradcam/.
 
 Usage:
@@ -58,7 +59,23 @@ def main() -> int:
 
     from PIL import Image
 
-    for i, row in enumerate(test_df.to_dict("records")):
+    records = test_df.to_dict("records")
+
+    # Cheap no-grad pre-pass to find the single widest raw q10-q90 age
+    # interval among the selected samples -- the example the model itself is
+    # least certain about age-wise, which the correct/incorrect/low-confidence
+    # gender-label categories below don't otherwise surface.
+    widest_interval_idx, widest_interval_width = None, -1.0
+    with torch.no_grad():
+        for i, row in enumerate(records):
+            with Image.open(row["image_path"]) as img:
+                image_tensor = transform(img.convert("RGB")).unsqueeze(0).to(device)
+            age_out = model(image_tensor)["age_output"]
+            width = float((age_out["q90"] - age_out["q10"])[0].item())
+            if width > widest_interval_width:
+                widest_interval_idx, widest_interval_width = i, width
+
+    for i, row in enumerate(records):
         with Image.open(row["image_path"]) as img:
             rgb = img.convert("RGB")
             image_tensor = transform(rgb).unsqueeze(0).to(device)
@@ -87,6 +104,12 @@ def main() -> int:
                 image_np / 255.0, gender_heatmap, output_dir / f"{category}_{i}_gender_attention.png",
                 f"Model attention visualization: gender-label ({class_names[predicted]})",
             )
+
+            if i == widest_interval_idx:
+                save_gradcam_overlay(
+                    image_np / 255.0, age_heatmap, output_dir / f"widest_interval_{i}_age_attention.png",
+                    f"Model attention visualization: age (widest q10-q90 interval, width={widest_interval_width:.1f})",
+                )
 
             quality = compute_quality_diagnostics(rgb, "jpg", Path(row["image_path"]).stat().st_size)
             if quality.warnings and i < 3:
