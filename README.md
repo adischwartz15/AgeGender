@@ -55,7 +55,11 @@ The central research question: does a **shared** visual backbone learn
 useful common features for both tasks, and do **task-specific adapters**
 plus **learned loss balancing** reduce negative transfer relative to
 independent backbones and fixed loss weights? See
-`docs/experiment_plan.md` and `docs/architecture_analysis.md`.
+`docs/experiment_plan.md` and `docs/architecture_analysis.md`. The final,
+reported run follows a protocol pre-registered before results are
+observed (models, seeds, metrics, robustness conditions, thresholds, and
+the decision rule for crediting residual complexity) -- see
+`docs/final_evaluation_protocol.md`.
 
 ## Ethical limitations
 
@@ -218,7 +222,11 @@ frontend/      React + TypeScript + Vite + Tailwind dashboard
 docs/          Architecture analysis, experiment plan, model/data cards, reproducibility
 data/          Local dataset (never committed); splits; not tracked by git
 checkpoints/   Trained model checkpoints (never committed)
-outputs/       Metrics, plots, reports, gradcam, robustness, calibration, kNN artifacts
+experiments/   Isolated per-experiment/seed run trees (checkpoints, calibration,
+               metrics, plots, robustness, knn) from run_seeds.py/run_experiments.py
+outputs/       Cross-run artifacts: architecture_analysis, backbone_comparison,
+               gradcam, reports, data_quality (single global outputs/calibration
+               or outputs/robustness are never used by the isolated pipeline above)
 ```
 
 ## Setup
@@ -335,10 +343,26 @@ make experiments
 ```
 
 Runs `scripts/run_experiments.py` against `configs/experiments.yaml`
-(Experiments 0, A-F, see `docs/experiment_plan.md`), reusing the same
+(Experiments 0/0b/0c, A-F, see `docs/experiment_plan.md`), reusing the same
 split for all of them. Experiment E (parametric vs. kNN) and Experiment F
 (pretrained vs. scratch, only if a pretrained checkpoint exists) are
 handled via the dedicated commands below rather than a fresh training run.
+
+Every experiment's checkpoint, conformal calibration artifact, and
+evaluation metrics/plots are written into an isolated
+`experiments/<experiment>/seed_<seed>/{checkpoints,calibration,metrics,plots,robustness,knn}`
+directory (`src/utils/experiment_paths.py`) -- never a shared global
+`checkpoints/` or `outputs/calibration`/`outputs/robustness` two
+experiments or seeds could silently collide in. `scripts/run_experiments.py`
+and `scripts/run_seeds.py` calibrate each checkpoint (`scripts/calibrate.py`)
+immediately after training it and before evaluating it with calibration
+applied; the calibration artifact records the checkpoint's SHA-256, the
+split CSV's SHA-256, and an ordered test-sample-ID hash, and
+`scripts/evaluate.py`/`scripts/run_robustness.py` validate those against
+whatever they're evaluating and raise loudly on any mismatch (see
+`src/evaluation/calibration.py:validate_calibration_artifact`) -- a stale
+or cross-experiment/cross-seed calibration artifact can never be silently
+applied.
 
 ### Plain CNN vs. Custom ResNet-18 backbone comparison (Experiment 0)
 
@@ -401,17 +425,19 @@ test-set image) against each checkpoint's own test split:
 
 ```bash
 python scripts/compare_backbones.py \
-    --checkpoint simple_cnn=checkpoints/exp_0_..._best_balanced_score.pt \
-    --checkpoint plain_deep18_no_skip=checkpoints/exp_0b_..._best_balanced_score.pt \
-    --checkpoint custom_resnet18=checkpoints/exp_d_..._best_balanced_score.pt \
-    --calibration-dir simple_cnn=outputs/calibration/exp_0 \
-    --calibration-dir plain_deep18_no_skip=outputs/calibration/exp_0b \
-    --calibration-dir custom_resnet18=outputs/calibration/exp_d \
-    --robustness-csv simple_cnn=outputs/robustness/exp_0/robustness_results.csv \
-    --robustness-csv custom_resnet18=outputs/robustness/exp_d/robustness_results.csv \
+    --checkpoint simple_cnn=experiments/exp_0_simple_cnn_shared_adapters_learned_balance/seed_42/checkpoints/exp_0_simple_cnn_shared_adapters_learned_balance_best_balanced_score.pt \
+    --checkpoint plain_deep18_no_skip=experiments/exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance/seed_42/checkpoints/exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance_best_balanced_score.pt \
+    --checkpoint custom_resnet18=experiments/exp_d_shared_adapters_learned_balance/seed_42/checkpoints/exp_d_shared_adapters_learned_balance_best_balanced_score.pt \
+    --calibration-dir simple_cnn=experiments/exp_0_simple_cnn_shared_adapters_learned_balance/seed_42/calibration \
+    --calibration-dir plain_deep18_no_skip=experiments/exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance/seed_42/calibration \
+    --calibration-dir custom_resnet18=experiments/exp_d_shared_adapters_learned_balance/seed_42/calibration \
+    --robustness-csv simple_cnn=experiments/exp_0_simple_cnn_shared_adapters_learned_balance/seed_42/robustness/robustness_results.csv \
+    --robustness-csv custom_resnet18=experiments/exp_d_shared_adapters_learned_balance/seed_42/robustness/robustness_results.csv \
     --resnet-name custom_resnet18 \
     --output-dir outputs/backbone_comparison
 ```
+
+(Optionally add `--checkpoint custom_resnet18_no_zero_init=experiments/exp_0c_.../seed_42/checkpoints/..._best_balanced_score.pt` for the zero-init-residual ablation -- see `docs/final_evaluation_protocol.md`.)
 
 Produces, under `--output-dir`:
 
@@ -426,16 +452,24 @@ Produces, under `--output-dir`:
   this can't be hidden. `plots/pareto_params_vs_mae.png` and
   `pareto_latency_vs_mae.png` visualize the trade-off.
 - `gender_risk_at_coverage.csv`, `gender_aurc.json`,
-  `gender_pairwise_bootstrap.json`, `plots/gender_risk_coverage.png` --
-  gender selective-risk-vs-coverage curves (confidence = max class
-  probability), AURC (lower is better), risk at 80/90/95/98% coverage, and
-  paired-bootstrap confidence intervals for the ResNet-vs-other difference
-  at each coverage level (models are always compared at the *same*
-  coverage, never at independent arbitrary thresholds).
+  `gender_pairwise_bootstrap.json`, `gender_aurc_bootstrap.json`,
+  `plots/gender_risk_coverage.png` -- gender selective-risk-vs-coverage
+  curves (confidence = max class probability), AURC (lower is better),
+  risk at 80/90/95/98% coverage with paired-bootstrap CIs for the
+  ResNet-vs-other difference *at each coverage level*
+  (`gender_pairwise_bootstrap.json`), and a **separate** paired-bootstrap
+  CI on the **AURC summary statistic itself**
+  (`gender_aurc_bootstrap.json`) -- only the latter is treated as
+  sufficient evidence for a "ResNet has lower AURC" claim; a CI at one
+  fixed coverage level is not. Models are always compared at the *same*
+  coverage, never at independent arbitrary thresholds, and only after
+  verifying both models share the identical, index-aligned test-sample
+  IDs (not just equal sample counts).
 - `age_selective_mae_at_coverage.csv`, `age_selective_aurc.json`,
-  `age_pairwise_bootstrap.json`, `plots/age_risk_coverage_{mae,rmse}.png`
-  -- the same analysis for age, using q90-q10 interval width as the
-  confidence score (narrower = more confident).
+  `age_pairwise_bootstrap.json`, `age_aurc_bootstrap.json`,
+  `plots/age_risk_coverage_{mae,rmse}.png` -- the same analysis (including
+  the AURC-vs-fixed-coverage CI distinction above) for age, using
+  q90-q10 interval width as the confidence score (narrower = more confident).
 - `age_bucket_mae.csv`, `age_error_percentiles.json`,
   `plots/age_error_cdf.png`, `plots/age_tail_error_rates.png` -- per-age-bucket
   MAE (0-12/13-19/20-34/35-49/50-64/65+), the empirical CDF of absolute
@@ -443,8 +477,10 @@ Produces, under `--output-dir`:
   reduces catastrophic errors even when average MAE is similar.
 - `robustness_degradation_<model>.csv`, `robustness_diff_table.csv`
   (when `--robustness-csv` is given per model) -- delta and relative
-  (%) degradation from the clean baseline per corruption/severity, plus a
-  direct model-vs-model difference table.
+  (%) degradation from the clean baseline per corruption/severity, plus
+  **every pairwise** model-vs-model difference (not just the first two by
+  argument order) -- with three models this includes SimpleCNN-vs-ResNet,
+  PlainDeep18NoSkip-vs-ResNet, and SimpleCNN-vs-PlainDeep18NoSkip all at once.
 - `final_interpretation.md` -- "Is Additional Residual Complexity
   Justified?": credits ResNet only when a paired-bootstrap CI excludes
   zero in its favor, and explicitly states the compact/plain alternative
@@ -458,17 +494,34 @@ when `RUN_PROFILE = "backbone_comparison"`.
 
 ```bash
 make calibrate CHECKPOINT=checkpoints/<your_checkpoint>.pt
+# or, with explicit isolation/provenance (what run_experiments.py/run_seeds.py do internally):
+python scripts/calibrate.py --checkpoint <checkpoint>.pt --calibration-dir <isolated_dir> --experiment-name <name> --seed <seed>
 ```
 
 Fits split-conformal calibration (`src/evaluation/calibration.py`) on the
 **dedicated calibration split only** -- deliberately not the validation
 split, which is reserved for early stopping/checkpoint selection, so no
 single split is used for two different decisions. Saves the offset to
-`outputs/calibration/conformal_calibration.json`. Reports coverage/width
+`conformal_calibration.json` under `--calibration-dir` (default:
+`configs/training.yaml: calibration.output_dir`). Reports coverage/width
 before and after calibration on the test set (touched only here, once)
-(`outputs/calibration/calibration_test_effect.json`). The API and
-`Predictor` only ever describe an interval as "calibrated" when this
-artifact exists and loaded successfully.
+(`calibration_test_effect.json` alongside it). The API and `Predictor`
+only ever describe an interval as "calibrated" when this artifact exists
+and loaded successfully.
+
+**Provenance and mismatch protection.** Every calibration artifact records
+the checkpoint's SHA-256, the split CSV's SHA-256, an ordered
+test-sample-ID hash, the experiment name, seed, alpha, and target
+coverage. `scripts/evaluate.py` and `scripts/run_robustness.py` validate a
+loaded calibration artifact's recorded provenance against the checkpoint
+and split actually being evaluated (`validate_calibration_artifact`) and
+raise `CalibrationMismatchError` loudly on any mismatch -- e.g. applying
+seed 42's calibration to seed 123's checkpoint, or a SimpleCNN checkpoint
+to a calibration artifact fit for ResNet. `scripts/run_seeds.py` and
+`scripts/run_experiments.py` never fall back to a shared global
+`outputs/calibration/` -- every checkpoint gets calibrated into its own
+isolated `experiments/<experiment>/seed_<seed>/calibration/` directory
+before being evaluated with calibration applied.
 
 ## k-NN non-parametric baseline
 
@@ -498,20 +551,38 @@ under `knn_comparison_table_path`, so downstream code never has to guess it).
 
 ```bash
 make robustness CHECKPOINT=checkpoints/<your_checkpoint>.pt
+# or, explicitly:
+python scripts/run_robustness.py --checkpoint <checkpoint>.pt \
+    --output-dir <isolated_dir>/robustness --calibration-dir <isolated_dir>/calibration \
+    [--max-samples N]
 ```
 
-Evaluates the test set (touched only for this, plus final evaluation --
-never for training or model selection) under 11 deterministic corruption
-types x 3 severities (`configs/robustness.yaml`,
+Evaluates the **full test split by default** (touched only for this, plus
+final evaluation -- never for training or model selection) under 11
+deterministic corruption types x 3 severities (`configs/robustness.yaml`,
 `src/evaluation/robustness.py`): Gaussian blur, Gaussian noise, low
 resolution (resize degradation), JPEG compression, low/high brightness,
 low/high contrast, grayscale conversion, partial occlusion, partial crop.
+`--max-samples` deterministically **stratified-samples** by age bucket x
+gender label down to about that many rows for faster iteration, instead
+of truncating to whichever rows happen to sort first in the split CSV
+(which could silently exclude an entire subgroup); the sampled IDs and
+sampling metadata are saved to `sampling_metadata.json`.
+
 For every condition, reports age MAE, gender-label accuracy, abstention
-rate, confidence, and interval width, compared against the clean
-baseline. Saves `outputs/robustness/robustness_results.csv`, plots,
-sample corrupted images, and a Markdown summary. Every corruption is
-deterministic for a fixed seed (`configs/robustness.yaml: robustness.seed`),
-so the same corrupted images are shown to every model compared.
+rate, confidence, and interval width -- **both raw and, when a calibration
+artifact is available, conformal-calibrated** (the fixed offset from the
+clean calibration split, never refit per corruption) -- compared against
+the clean baseline. Output defaults to a checkpoint/experiment/seed-specific
+directory (the same checkpoint's own isolated
+`experiments/<experiment>/seed_<seed>/robustness/`, if the checkpoint lives
+in that layout), never a single shared global `outputs/robustness/` two
+checkpoints could silently overwrite. Saves `robustness_results.csv`,
+`robustness_degradation.csv`, both performance-vs-severity and
+degradation-vs-severity plots per metric, sample corrupted images, and a
+Markdown summary. Every corruption is deterministic for a fixed seed
+(`configs/robustness.yaml: robustness.seed`), so the same corrupted images
+are shown to every model compared.
 
 For a multi-model comparison, `src/evaluation/robustness.py` additionally
 provides `compute_degradation()` (adds `{metric}_delta` and
@@ -684,10 +755,13 @@ python scripts/run_seeds.py --experiment exp_0b_plain_deep18_no_skip_shared_adap
 python scripts/run_seeds.py --experiment exp_d_shared_adapters_learned_balance --seeds 42,123,2026
 ```
 
-**Running only robustness evaluation** (checkpoints already trained):
+**Running only robustness evaluation** (checkpoints already trained). With
+the isolated layout above, `--output-dir`/`--calibration-dir` default to
+that same checkpoint's own `robustness/`/`calibration/` subdirectories, so
+they don't need to be passed explicitly:
 ```bash
-python scripts/run_robustness.py --checkpoint checkpoints/exp_0_..._best_balanced_score.pt
-python scripts/run_robustness.py --checkpoint checkpoints/exp_d_..._best_balanced_score.pt
+python scripts/run_robustness.py --checkpoint experiments/exp_0_simple_cnn_shared_adapters_learned_balance/seed_42/checkpoints/exp_0_simple_cnn_shared_adapters_learned_balance_best_balanced_score.pt
+python scripts/run_robustness.py --checkpoint experiments/exp_d_shared_adapters_learned_balance/seed_42/checkpoints/exp_d_shared_adapters_learned_balance_best_balanced_score.pt
 ```
 Or in a notebook: set `RUN_ROBUSTNESS=True` and the other `RUN_*` optional
 flags to `False`, then re-run with `RESUME_RUN_ID` set and

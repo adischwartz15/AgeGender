@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import numpy as np
 
+import pytest
+
 from src.evaluation.backbone_comparison import (
     build_age_selective_analysis, build_clean_test_summary, build_clean_test_table,
     build_final_interpretation, build_gender_risk_coverage_analysis, build_tail_error_analysis,
@@ -42,6 +44,9 @@ def _synthetic_preds(n=200, age_mae_scale=1.0, gender_error_rate=0.1, seed=0, la
         "age": age, "age_mask": np.ones(n, dtype=bool),
         "gender": y_true_gender, "gender_mask": np.ones(n, dtype=bool),
         "latency_ms_per_image": latency,
+        # Two models "evaluated on the same test set" share this ordered id
+        # array -- required by build_*_analysis's paired-alignment check.
+        "sample_id": np.arange(n),
     }
 
 
@@ -100,6 +105,42 @@ def test_age_selective_analysis_structure():
     assert set(result["rmse_curves"]) == {"a", "b"}
     assert list(result["at_coverage"]["coverage"]) == [0.80, 0.90, 0.95, 0.98]
     assert "b" in result["pairwise_bootstrap"]
+
+
+def test_gender_risk_coverage_analysis_includes_aurc_bootstrap_ci():
+    models_preds = {"a": _synthetic_preds(seed=1), "b": _synthetic_preds(seed=2)}
+    result = build_gender_risk_coverage_analysis(models_preds, confidence_threshold=0.80, primary_model="a")
+    assert "b" in result["pairwise_bootstrap_aurc"]
+    ci = result["pairwise_bootstrap_aurc"]["b"]
+    for key in ("aurc_a", "aurc_b", "aurc_diff_b_minus_a", "ci_lower", "ci_upper", "excludes_zero"):
+        assert key in ci
+
+
+def test_age_selective_analysis_includes_aurc_bootstrap_ci():
+    models_preds = {"a": _synthetic_preds(seed=1), "b": _synthetic_preds(seed=2)}
+    result = build_age_selective_analysis(models_preds, primary_model="a")
+    assert "b" in result["pairwise_bootstrap_aurc"]
+    assert "aurc_diff_b_minus_a" in result["pairwise_bootstrap_aurc"]["b"]
+
+
+def test_gender_risk_coverage_analysis_rejects_mismatched_sample_ids():
+    """Regression test: equal sample count must not be treated as sufficient
+    evidence of alignment -- two models with the same-length but differently
+    ordered/identified samples must raise, not silently compute a bootstrap
+    CI over mismatched pairs."""
+    preds_a = _synthetic_preds(seed=1)
+    preds_b = _synthetic_preds(seed=2)
+    preds_b["sample_id"] = preds_b["sample_id"][::-1]  # same count, reordered identifiers
+    with pytest.raises(ValueError):
+        build_gender_risk_coverage_analysis({"a": preds_a, "b": preds_b}, confidence_threshold=0.80, primary_model="a")
+
+
+def test_age_selective_analysis_rejects_missing_sample_ids():
+    preds_a = _synthetic_preds(seed=1)
+    preds_b = _synthetic_preds(seed=2)
+    del preds_b["sample_id"]
+    with pytest.raises(ValueError):
+        build_age_selective_analysis({"a": preds_a, "b": preds_b}, primary_model="a")
 
 
 def test_tail_error_analysis_structure_and_buckets():

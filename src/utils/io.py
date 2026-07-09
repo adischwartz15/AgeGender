@@ -52,3 +52,20 @@ def ensure_dir(path: str | Path) -> Path:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+CHECKPOINT_BEST_SUFFIXES = ("_best_balanced_score", "_best_age_mae", "_best_gender_accuracy")
+
+
+def checkpoint_experiment_name(checkpoint_path: str | Path) -> str:
+    """Derive the experiment name from a checkpoint filename.
+
+    E.g. "exp_c_shared_adapters_best_balanced_score.pt" -> "exp_c_shared_adapters".
+    Shared by scripts/evaluate.py and scripts/calibrate.py so both derive
+    the same experiment name from the same checkpoint filename.
+    """
+    stem = Path(checkpoint_path).stem
+    for suffix in CHECKPOINT_BEST_SUFFIXES:
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem

@@ -66,31 +66,52 @@ def build_architecture_ablation_table(experiment_results: dict[str, dict]) -> pd
     return pd.DataFrame(rows)
 
 
+_BACKBONE_COMPARISON_KEYS = [
+    ("backbone_name", "Backbone"),
+    ("total_parameters", "Total parameters"),
+    ("backbone_parameters", "Backbone parameters"),
+    ("mean_epoch_time_seconds", "Mean epoch time (s)"),
+    ("latency_ms_per_image", "Inference latency per image (ms)"),
+    ("age_mae", "Age MAE"),
+    ("age_rmse", "Age RMSE"),
+    ("gender_accuracy", "Gender-label accuracy"),
+    ("abstention_rate", "Abstention rate"),
+    ("interval_coverage", "Raw interval coverage"),
+    ("interval_coverage_calibrated", "Calibrated interval coverage"),
+    ("mean_interval_width", "Mean interval width"),
+]
+
+
 def build_backbone_comparison_table(cnn_metrics: dict, resnet_metrics: dict) -> pd.DataFrame:
     """Side-by-side table for the plain-CNN-vs-Custom-ResNet-18 backbone comparison.
 
     Each of ``cnn_metrics`` / ``resnet_metrics`` is expected to already
     merge that experiment's parameter breakdown, timing, and test metrics
     into one flat dict (see ``scripts/generate_architecture_report.py``).
-    Missing keys render as ``None`` rather than being fabricated.
+    Missing keys render as ``None`` rather than being fabricated. Kept for
+    backward compatibility -- see :func:`build_backbone_comparison_table_multi`
+    for the 3-model (SimpleCNN / PlainDeep18NoSkip / Custom ResNet-18) table.
     """
-    keys = [
-        ("backbone_name", "Backbone"),
-        ("total_parameters", "Total parameters"),
-        ("backbone_parameters", "Backbone parameters"),
-        ("mean_epoch_time_seconds", "Mean epoch time (s)"),
-        ("latency_ms_per_image", "Inference latency per image (ms)"),
-        ("age_mae", "Age MAE"),
-        ("age_rmse", "Age RMSE"),
-        ("gender_accuracy", "Gender-label accuracy"),
-        ("abstention_rate", "Abstention rate"),
-        ("interval_coverage", "Raw interval coverage"),
-        ("interval_coverage_calibrated", "Calibrated interval coverage"),
-        ("mean_interval_width", "Mean interval width"),
-    ]
     rows = []
-    for key, label in keys:
+    for key, label in _BACKBONE_COMPARISON_KEYS:
         rows.append({"metric": label, "simple_cnn": cnn_metrics.get(key), "custom_resnet18": resnet_metrics.get(key)})
+    return pd.DataFrame(rows)
+
+
+def build_backbone_comparison_table_multi(metrics_by_name: dict[str, dict]) -> pd.DataFrame:
+    """Side-by-side table across an arbitrary number of backbone experiments.
+
+    ``metrics_by_name`` maps a display column name (e.g. "simple_cnn",
+    "plain_deep18_no_skip", "custom_resnet18") to that experiment's merged
+    parameter-breakdown/timing/test-metrics dict. Missing keys render as
+    ``None`` rather than being fabricated.
+    """
+    rows = []
+    for key, label in _BACKBONE_COMPARISON_KEYS:
+        row = {"metric": label}
+        for name, metrics in metrics_by_name.items():
+            row[name] = metrics.get(key)
+        rows.append(row)
     return pd.DataFrame(rows)
 
 

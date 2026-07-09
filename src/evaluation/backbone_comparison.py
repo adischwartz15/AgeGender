@@ -23,7 +23,8 @@ from src.evaluation.metrics import (
     gender_effective_accuracy, interval_coverage, mean_interval_width,
 )
 from src.evaluation.selective import (
-    compute_aurc, paired_bootstrap_risk_diff_ci, risk_at_coverage, selective_risk_coverage_curve,
+    compute_aurc, paired_bootstrap_aurc_diff_ci, paired_bootstrap_risk_diff_ci, risk_at_coverage,
+    selective_risk_coverage_curve,
 )
 
 COMMON_COVERAGE_LEVELS = (0.80, 0.90, 0.95, 0.98)
@@ -41,7 +42,37 @@ def _gender_arrays(preds: dict, confidence_threshold: float) -> dict:
     predicted = probs.argmax(axis=1)
     confidence = probs.max(axis=1)
     abstain = confidence < confidence_threshold
-    return {"y_true": y_true, "predicted": predicted, "confidence": confidence, "abstain": abstain}
+    sample_id = preds.get("sample_id")
+    return {
+        "y_true": y_true, "predicted": predicted, "confidence": confidence, "abstain": abstain,
+        "sample_id": sample_id[mask] if sample_id is not None else None,
+    }
+
+
+def _assert_paired_alignment(sample_ids_a, sample_ids_b, name_a: str, name_b: str) -> None:
+    """Raise unless two models' per-sample arrays are provably index-aligned.
+
+    Equal array *length* is not sufficient evidence of alignment -- a
+    different row order, different upstream filtering, or even a
+    different split file entirely could still produce arrays of the same
+    length that silently pair up the wrong samples. This checks the
+    actual ordered sample identifiers (``scripts/evaluate.py:run_inference``'s
+    ``"sample_id"``, the test-split image path in row order) match exactly
+    before any paired statistic (paired bootstrap CI, direct per-sample
+    diff) is computed from them.
+    """
+    if sample_ids_a is None or sample_ids_b is None:
+        raise ValueError(
+            f"Cannot verify '{name_a}' and '{name_b}' were evaluated on the identical, "
+            "index-aligned test set: sample IDs were not recorded for one or both models "
+            "(predictions must come from scripts/evaluate.py:run_inference, which returns them)."
+        )
+    if len(sample_ids_a) != len(sample_ids_b) or not np.array_equal(sample_ids_a, sample_ids_b):
+        raise ValueError(
+            f"'{name_a}' and '{name_b}' are not index-aligned: their ordered test-sample IDs "
+            "differ (different order, different filtering, or a different split file). Equal "
+            "array length alone is not sufficient evidence of alignment for a paired comparison."
+        )
 
 
 def build_clean_test_summary(
@@ -109,14 +140,20 @@ def build_gender_risk_coverage_analysis(
     """Gender selective-risk-vs-coverage analysis across models (Part B.2).
 
     Returns ``{"curves": {model: (coverages, risks)}, "aurc": {model: float},
-    "at_coverage": DataFrame, "pairwise_bootstrap": {model: ci_dict}}``.
+    "at_coverage": DataFrame, "pairwise_bootstrap": {model: ci_dict},
+    "pairwise_bootstrap_aurc": {model: ci_dict}}``.
+
     ``pairwise_bootstrap`` compares every non-primary model against
     ``primary_model`` (default: the first model) at each common coverage
-    level, using the paired bootstrap (valid only when both models share
-    the same index-aligned samples -- callers must pass predictions
-    computed over the identical test set for every model).
+    level; ``pairwise_bootstrap_aurc`` compares the scalar AURC statistic
+    itself. Both use the paired bootstrap, valid only when both models
+    share the identical, index-aligned test samples -- this is verified
+    via each model's recorded ``sample_id`` (see
+    ``scripts/evaluate.py:run_inference``), not merely equal array length,
+    before any paired statistic is computed; a genuine mismatch raises
+    rather than silently skipping or mispairing samples.
     """
-    curves, aurc, confidences, losses = {}, {}, {}, {}
+    curves, aurc, confidences, losses, sample_ids = {}, {}, {}, {}, {}
     for name, preds in models_preds.items():
         g = _gender_arrays(preds, confidence_threshold)
         loss = (g["predicted"] != g["y_true"]).astype(float)
@@ -124,6 +161,7 @@ def build_gender_risk_coverage_analysis(
         curves[name] = (coverages, risks)
         aurc[name] = compute_aurc(coverages, risks)
         confidences[name], losses[name] = g["confidence"], loss
+        sample_ids[name] = g["sample_id"]
 
     at_coverage_rows = []
     for level in COMMON_COVERAGE_LEVELS:
@@ -133,29 +171,39 @@ def build_gender_risk_coverage_analysis(
         at_coverage_rows.append(row)
     at_coverage_table = pd.DataFrame(at_coverage_rows)
 
-    pairwise_bootstrap = {}
+    pairwise_bootstrap, pairwise_bootstrap_aurc = {}, {}
     primary = primary_model or next(iter(models_preds))
     if primary in confidences:
         for name in models_preds:
             if name == primary:
                 continue
-            n = min(len(confidences[primary]), len(confidences[name]))
-            if len(confidences[primary]) != len(confidences[name]):
-                continue  # not index-aligned (different sample counts) -- skip rather than misuse the paired test
+            _assert_paired_alignment(sample_ids[primary], sample_ids[name], primary, name)
             pairwise_bootstrap[name] = {
                 level: paired_bootstrap_risk_diff_ci(
-                    confidences[primary][:n], losses[primary][:n],
-                    confidences[name][:n], losses[name][:n], target_coverage=level,
+                    confidences[primary], losses[primary], confidences[name], losses[name], target_coverage=level,
                 )
                 for level in COMMON_COVERAGE_LEVELS
             }
+            pairwise_bootstrap_aurc[name] = paired_bootstrap_aurc_diff_ci(
+                confidences[primary], losses[primary], confidences[name], losses[name],
+            )
 
-    return {"curves": curves, "aurc": aurc, "at_coverage": at_coverage_table, "pairwise_bootstrap": pairwise_bootstrap}
+    return {
+        "curves": curves, "aurc": aurc, "at_coverage": at_coverage_table,
+        "pairwise_bootstrap": pairwise_bootstrap, "pairwise_bootstrap_aurc": pairwise_bootstrap_aurc,
+    }
 
 
 def build_age_selective_analysis(models_preds: dict[str, dict], primary_model: str | None = None) -> dict:
-    """Age selective-prediction analysis using interval width as the confidence score (Part B.3)."""
-    mae_curves, rmse_curves, aurc, confidences, abs_errors = {}, {}, {}, {}, {}
+    """Age selective-prediction analysis using interval width as the confidence score (Part B.3).
+
+    Same paired-alignment and AURC-bootstrap treatment as
+    :func:`build_gender_risk_coverage_analysis` (see its docstring):
+    ``pairwise_bootstrap`` is per fixed coverage level, ``pairwise_bootstrap_aurc``
+    is for the scalar AURC statistic, and alignment is checked via each
+    model's recorded ``sample_id`` rather than array length alone.
+    """
+    mae_curves, rmse_curves, aurc, confidences, abs_errors, sample_ids = {}, {}, {}, {}, {}, {}
     for name, preds in models_preds.items():
         mask = preds["age_mask"].astype(bool)
         y_true, q10, q50, q90 = preds["age"][mask], preds["q10"][mask], preds["q50"][mask], preds["q90"][mask]
@@ -169,6 +217,8 @@ def build_age_selective_analysis(models_preds: dict[str, dict], primary_model: s
         rmse_curves[name] = (mae_coverages, rmse_risks)
         aurc[name] = compute_aurc(mae_coverages, mae_risks)
         confidences[name], abs_errors[name] = confidence, errors
+        sample_id = preds.get("sample_id")
+        sample_ids[name] = sample_id[mask] if sample_id is not None else None
 
     at_coverage_rows = []
     for level in COMMON_COVERAGE_LEVELS:
@@ -178,12 +228,13 @@ def build_age_selective_analysis(models_preds: dict[str, dict], primary_model: s
         at_coverage_rows.append(row)
     at_coverage_table = pd.DataFrame(at_coverage_rows)
 
-    pairwise_bootstrap = {}
+    pairwise_bootstrap, pairwise_bootstrap_aurc = {}, {}
     primary = primary_model or next(iter(models_preds))
     if primary in confidences:
         for name in models_preds:
-            if name == primary or len(confidences[primary]) != len(confidences[name]):
+            if name == primary:
                 continue
+            _assert_paired_alignment(sample_ids[primary], sample_ids[name], primary, name)
             pairwise_bootstrap[name] = {
                 level: paired_bootstrap_risk_diff_ci(
                     confidences[primary], abs_errors[primary], confidences[name], abs_errors[name],
@@ -191,10 +242,14 @@ def build_age_selective_analysis(models_preds: dict[str, dict], primary_model: s
                 )
                 for level in COMMON_COVERAGE_LEVELS
             }
+            pairwise_bootstrap_aurc[name] = paired_bootstrap_aurc_diff_ci(
+                confidences[primary], abs_errors[primary], confidences[name], abs_errors[name],
+            )
 
     return {
         "mae_curves": mae_curves, "rmse_curves": rmse_curves, "aurc": aurc,
         "at_coverage": at_coverage_table, "pairwise_bootstrap": pairwise_bootstrap,
+        "pairwise_bootstrap_aurc": pairwise_bootstrap_aurc,
     }
 
 
@@ -247,9 +302,14 @@ def build_final_interpretation(
     ``gender_risk_analysis`` / ``age_selective_analysis`` must have been
     built with ``primary_model=resnet_name`` (see
     ``build_gender_risk_coverage_analysis`` / ``build_age_selective_analysis``),
-    since their ``pairwise_bootstrap[other]`` entries are defined as
-    ResNet-vs-``other`` (``risk_diff_b_minus_a = risk(other) - risk(resnet)``;
-    positive means ResNet has *lower* risk, i.e. an advantage).
+    since their ``pairwise_bootstrap_aurc[other]`` entries are defined as
+    ResNet-vs-``other`` (``aurc_diff_b_minus_a = AURC(other) - AURC(resnet)``;
+    positive means ResNet has *lower* AURC, i.e. an advantage).
+
+    A claim of "statistically supported AURC advantage" is gated strictly
+    on ``pairwise_bootstrap_aurc`` (the bootstrap CI computed on the AURC
+    summary statistic itself), never on ``pairwise_bootstrap`` (which is
+    only a CI at fixed coverage levels and is not evidence about AURC).
     """
     lines = ["## Is Additional Residual Complexity Justified?\n"]
 
@@ -270,28 +330,20 @@ def build_final_interpretation(
         param_diff = resnet_row.get("total_parameters", 0) - other_row.get("total_parameters", 0)
         latency_diff = (resnet_row.get("latency_ms_per_image") or 0) - (other_row.get("latency_ms_per_image") or 0)
 
-        gender_aurc_resnet = gender_risk_analysis.get("aurc", {}).get(resnet_name)
-        gender_aurc_other = gender_risk_analysis.get("aurc", {}).get(other)
-        age_aurc_resnet = age_selective_analysis.get("aurc", {}).get(resnet_name)
-        age_aurc_other = age_selective_analysis.get("aurc", {}).get(other)
+        # pairwise_bootstrap_aurc[other] compares (a=resnet, b=other): a
+        # positive aurc_diff_b_minus_a means "other" has higher AURC (worse)
+        # than ResNet, i.e. a ResNet advantage on that AURC statistic.
+        gender_aurc_ci = gender_risk_analysis.get("pairwise_bootstrap_aurc", {}).get(other)
+        age_aurc_ci = age_selective_analysis.get("pairwise_bootstrap_aurc", {}).get(other)
+        gender_significant = bool(gender_aurc_ci and gender_aurc_ci.get("excludes_zero") and gender_aurc_ci.get("aurc_diff_b_minus_a", 0) > 0)
+        age_significant = bool(age_aurc_ci and age_aurc_ci.get("excludes_zero") and age_aurc_ci.get("aurc_diff_b_minus_a", 0) > 0)
 
-        # pairwise_bootstrap[other] compares (a=resnet, b=other): a positive
-        # risk_diff_b_minus_a means "other" has higher risk than ResNet, i.e.
-        # a ResNet advantage.
-        gender_ci = gender_risk_analysis.get("pairwise_bootstrap", {}).get(other, {})
-        age_ci = age_selective_analysis.get("pairwise_bootstrap", {}).get(other, {})
-        gender_significant = any(ci.get("excludes_zero") and ci.get("risk_diff_b_minus_a", 0) > 0 for ci in gender_ci.values())
-        age_significant = any(ci.get("excludes_zero") and ci.get("risk_diff_b_minus_a", 0) > 0 for ci in age_ci.values())
-
-        resnet_lower_gender_aurc = gender_aurc_resnet is not None and gender_aurc_other is not None and gender_aurc_resnet < gender_aurc_other
-        resnet_lower_age_aurc = age_aurc_resnet is not None and age_aurc_other is not None and age_aurc_resnet < age_aurc_other
-
-        if (resnet_lower_gender_aurc and gender_significant) or (resnet_lower_age_aurc and age_significant):
+        if gender_significant or age_significant:
             decisive_advantage_found = True
             findings.append(
                 f"- vs. `{other}`: Custom ResNet-18 shows a statistically supported "
-                f"(bootstrap CI excludes zero) reduction in selective risk "
-                f"({'gender AURC' if resnet_lower_gender_aurc and gender_significant else 'age AURC'}), "
+                f"(paired bootstrap CI on AURC itself excludes zero) reduction in selective "
+                f"risk ({'gender AURC' if gender_significant else 'age AURC'}), "
                 f"at the cost of {int(param_diff):+,} parameters and {latency_diff:+.2f} ms/image. "
                 "This is a plausible deployment scenario where the added residual "
                 "complexity pays for itself -- e.g. when tail-risk/selective-prediction "
@@ -300,11 +352,11 @@ def build_final_interpretation(
         else:
             findings.append(
                 f"- vs. `{other}`: no statistically supported ResNet advantage was found "
-                f"in gender or age selective risk (AURC) at the coverage levels tested "
-                f"({COMMON_COVERAGE_LEVELS}). Given ResNet costs {int(param_diff):+,} more "
-                f"parameters and {latency_diff:+.2f} ms/image more latency, `{other}` is the "
-                "preferred model for this dataset and training setup unless a specific "
-                "downstream requirement (not evaluated here) favors ResNet.\n"
+                "in gender or age selective risk -- specifically, no paired bootstrap CI on "
+                "the AURC summary statistic itself excludes zero in ResNet's favor. Given "
+                f"ResNet costs {int(param_diff):+,} more parameters and {latency_diff:+.2f} ms/image "
+                f"more latency, `{other}` is the preferred model for this dataset and training "
+                "setup unless a specific downstream requirement (not evaluated here) favors ResNet.\n"
             )
 
     lines.extend(findings)

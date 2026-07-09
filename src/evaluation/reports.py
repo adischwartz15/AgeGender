@@ -16,8 +16,20 @@ import pandas as pd
 
 _MISSING = "_Not yet generated. Run `{cmd}` to produce this section._"
 
+# Backbone-comparison experiment names. Note the framing difference:
+# _CNN_EXPERIMENT (SimpleCNN) also differs from _RESNET_EXPERIMENT in depth
+# and width, so that pairing is an efficiency/accuracy trade-off, not a
+# clean residual-connection ablation. _PLAIN_DEEP18_EXPERIMENT holds depth,
+# width, and everything else fixed and removes only the skip connections --
+# *that* pairing (vs _RESNET_EXPERIMENT) is the actual residual-connection
+# ablation. _RESNET_NO_ZERO_INIT_EXPERIMENT is the same backbone as
+# _RESNET_EXPERIMENT with model.backbone.zero_init_residual=false, isolating
+# the effect of zero-initializing residual branches specifically (see
+# configs/experiments.yaml and docs/experiment_plan.md).
 _CNN_EXPERIMENT = "exp_0_simple_cnn_shared_adapters_learned_balance"
+_PLAIN_DEEP18_EXPERIMENT = "exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance"
 _RESNET_EXPERIMENT = "exp_d_shared_adapters_learned_balance"
+_RESNET_NO_ZERO_INIT_EXPERIMENT = "exp_0c_custom_resnet18_no_zero_init_shared_adapters_learned_balance"
 
 
 def _read_json(path: Path) -> dict | None:
@@ -48,20 +60,53 @@ def _df_to_md_table(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
+def _experiment_search_dirs(outputs_dir: str | Path, subdir: str) -> list[Path]:
+    """Every ``subdir`` directory to search: the flat legacy ``outputs/{subdir}``
+    directory plus every isolated ``experiments/<experiment>/seed_<seed>/{subdir}``
+    directory produced by ``scripts/run_seeds.py`` / ``scripts/run_experiments.py``
+    (see ``src/utils/experiment_paths.py``). Merging both means report
+    generation finds real artifacts regardless of which pipeline produced
+    them, instead of only ever looking at a single shared directory a
+    second experiment/seed's isolated run would never write into.
+    """
+    from src.utils.config import REPO_ROOT
+
+    dirs = [Path(outputs_dir) / subdir]
+    experiments_root = REPO_ROOT / "experiments"
+    if experiments_root.exists():
+        dirs.extend(sorted(p for p in experiments_root.glob(f"*/seed_*/{subdir}") if p.is_dir()))
+    return dirs
+
+
+def _experiment_metrics_dirs(outputs_dir: str | Path) -> list[Path]:
+    return _experiment_search_dirs(outputs_dir, "metrics")
+
+
+def _read_json_from_any(dirs: list[Path], filename: str) -> dict | None:
+    """Return the first existing ``{dir}/{filename}``'s parsed JSON, searching in order."""
+    for directory in dirs:
+        data = _read_json(directory / filename)
+        if data is not None:
+            return data
+    return None
+
+
 def _load_merged_experiment_metrics(outputs_dir: Path, exp_name: str) -> dict | None:
     """Merge an experiment's parameter breakdown, timing, and test metrics into one flat dict.
 
+    Searches both the flat legacy ``outputs/metrics`` directory and every
+    isolated per-experiment/seed directory (see ``_experiment_metrics_dirs``).
     Returns None if the experiment hasn't been trained yet (no parameter
-    breakdown file on disk), so callers can render an honest "not yet run"
-    message instead of a table with silently-missing rows.
+    breakdown file found anywhere), so callers can render an honest "not
+    yet run" message instead of a table with silently-missing rows.
     """
-    metrics_dir = outputs_dir / "metrics"
-    param_data = _read_json(metrics_dir / f"{exp_name}_parameter_breakdown.json")
+    dirs = _experiment_metrics_dirs(outputs_dir)
+    param_data = _read_json_from_any(dirs, f"{exp_name}_parameter_breakdown.json")
     if param_data is None:
         return None
     merged = dict(param_data)
-    merged.update(_read_json(metrics_dir / f"{exp_name}_timing.json") or {})
-    merged.update(_read_json(metrics_dir / f"{exp_name}_test_metrics.json") or {})
+    merged.update(_read_json_from_any(dirs, f"{exp_name}_timing.json") or {})
+    merged.update(_read_json_from_any(dirs, f"{exp_name}_test_metrics.json") or {})
     return merged
 
 
@@ -98,8 +143,15 @@ def _backbone_comparison_interpretation(cnn_metrics: dict, resnet_metrics: dict)
     )
 
 
-def discover_experiment_results(metrics_dir: str | Path) -> dict[str, dict]:
-    """Scan ``outputs/metrics`` for per-experiment artifacts and merge them.
+def discover_experiment_results(outputs_dir_or_metrics_dir: str | Path) -> dict[str, dict]:
+    """Scan for per-experiment artifacts (across every isolated run) and merge them.
+
+    Accepts either an ``outputs_dir`` (preferred -- also searches every
+    isolated ``experiments/<experiment>/seed_<seed>/metrics`` directory, see
+    ``_experiment_metrics_dirs``) or a bare flat ``metrics_dir`` (legacy
+    call shape, still supported: passing ``.../outputs/metrics`` directly
+    also works since ``_experiment_metrics_dirs`` treats a path ending in
+    ``metrics`` the same as ``outputs_dir / "metrics"``).
 
     For each ``{experiment}_parameter_breakdown.json`` found, merges in the
     matching ``_timing.json`` and ``_test_metrics.json`` (both optional) into
@@ -107,43 +159,101 @@ def discover_experiment_results(metrics_dir: str | Path) -> dict[str, dict]:
     ``generate_architecture_report.py`` and ``generate_final_report.py`` so
     the two reports never disagree about which experiments have real results.
     """
-    metrics_dir = Path(metrics_dir)
+    given = Path(outputs_dir_or_metrics_dir)
+    outputs_dir = given.parent if given.name == "metrics" else given
+    dirs = _experiment_metrics_dirs(outputs_dir)
+
     results: dict[str, dict] = {}
-    for param_file in metrics_dir.glob("*_parameter_breakdown.json"):
-        exp_name = param_file.name.replace("_parameter_breakdown.json", "")
-        breakdown = _read_json(param_file) or {}
-        timing = _read_json(metrics_dir / f"{exp_name}_timing.json") or {}
-        test_metrics = _read_json(metrics_dir / f"{exp_name}_test_metrics.json") or {}
-        results[exp_name] = {"parameter_breakdown": breakdown, "test_metrics": test_metrics, **timing}
+    for metrics_dir in dirs:
+        if not metrics_dir.exists():
+            continue
+        for param_file in metrics_dir.glob("*_parameter_breakdown.json"):
+            exp_name = param_file.name.replace("_parameter_breakdown.json", "")
+            if exp_name in results:
+                continue  # already found in an earlier (higher-priority) search dir
+            breakdown = _read_json(param_file) or {}
+            timing = _read_json(metrics_dir / f"{exp_name}_timing.json") or {}
+            test_metrics = _read_json(metrics_dir / f"{exp_name}_test_metrics.json") or {}
+            results[exp_name] = {"parameter_breakdown": breakdown, "test_metrics": test_metrics, **timing}
     return results
 
 
 def build_backbone_comparison_section(outputs_dir: Path) -> str:
-    lines = ["## Plain CNN vs Custom ResNet-18 Backbone Comparison\n"]
-    lines.append(
-        "Controlled comparison isolating the residual backbone's contribution: "
-        f"`{_CNN_EXPERIMENT}` and `{_RESNET_EXPERIMENT}` share the same adapters, "
-        "heads, learned uncertainty loss balancing, training setup, and data "
-        "split -- the backbone is the only intended architectural difference.\n"
-    )
+    """Backbone comparison across all three (or four, if exp_0c has been run) models.
 
-    cnn_metrics = _load_merged_experiment_metrics(outputs_dir, _CNN_EXPERIMENT)
-    resnet_metrics = _load_merged_experiment_metrics(outputs_dir, _RESNET_EXPERIMENT)
+    Framing matters here and was previously wrong: SimpleCNN vs Custom
+    ResNet-18 differ in depth *and* width in addition to residual
+    connections, so that pairing is only an efficiency/accuracy
+    trade-off -- it does not isolate what residual connections
+    contribute. PlainDeep18NoSkip vs Custom ResNet-18 hold depth, width,
+    and everything else fixed and remove only the skip connections, so
+    *that* pairing is the actual residual-connection ablation. Both are
+    shown, correctly labeled, plus (if available) the zero-init-residual
+    ablation (Custom ResNet-18 vs. its no-zero-init variant).
+    """
+    lines = ["## Backbone Comparison (SimpleCNN / PlainDeep18NoSkip / Custom ResNet-18)\n"]
 
-    if cnn_metrics is None or resnet_metrics is None:
-        missing = [n for n, m in ((_CNN_EXPERIMENT, cnn_metrics), (_RESNET_EXPERIMENT, resnet_metrics)) if m is None]
+    metrics_by_experiment = {
+        _CNN_EXPERIMENT: _load_merged_experiment_metrics(outputs_dir, _CNN_EXPERIMENT),
+        _PLAIN_DEEP18_EXPERIMENT: _load_merged_experiment_metrics(outputs_dir, _PLAIN_DEEP18_EXPERIMENT),
+        _RESNET_EXPERIMENT: _load_merged_experiment_metrics(outputs_dir, _RESNET_EXPERIMENT),
+    }
+    missing = [name for name, m in metrics_by_experiment.items() if m is None]
+    if missing:
         lines.append(
-            "Results unavailable: run the corresponding experiment first "
-            f"(`python scripts/run_experiments.py --only {','.join(missing)}`, "
-            "then `scripts/evaluate.py` against each resulting checkpoint).\n"
+            "Results unavailable for: " + ", ".join(f"`{m}`" for m in missing) + ". Run "
+            f"(`python scripts/run_experiments.py --only {','.join(missing)}`, then "
+            "`scripts/evaluate.py` against each resulting checkpoint).\n"
         )
         return "\n".join(lines)
 
-    from src.evaluation.comparison import build_backbone_comparison_table
+    from src.evaluation.comparison import build_backbone_comparison_table_multi
 
-    table = build_backbone_comparison_table(cnn_metrics, resnet_metrics)
+    display_names = {_CNN_EXPERIMENT: "simple_cnn", _PLAIN_DEEP18_EXPERIMENT: "plain_deep18_no_skip", _RESNET_EXPERIMENT: "custom_resnet18"}
+    table = build_backbone_comparison_table_multi({display_names[k]: v for k, v in metrics_by_experiment.items()})
     lines.append(_df_to_md_table(table) + "\n")
+
+    cnn_metrics, plain_metrics, resnet_metrics = (
+        metrics_by_experiment[_CNN_EXPERIMENT], metrics_by_experiment[_PLAIN_DEEP18_EXPERIMENT], metrics_by_experiment[_RESNET_EXPERIMENT],
+    )
+
+    lines.append("### SimpleCNN vs Custom ResNet-18 (efficiency/accuracy trade-off, *not* a residual-connection ablation)\n")
+    lines.append(
+        "SimpleCNN also differs from Custom ResNet-18 in depth and width, not just "
+        "the presence of residual connections -- any difference below reflects that "
+        "whole bundle of architectural choices, not residual connections in isolation.\n"
+    )
     lines.append(_backbone_comparison_interpretation(cnn_metrics, resnet_metrics))
+
+    lines.append("### PlainDeep18NoSkip vs Custom ResNet-18 (the residual-connection ablation)\n")
+    lines.append(
+        "PlainDeep18NoSkip matches Custom ResNet-18's stem, stage widths, block "
+        "layout, embedding size, adapters, loss balancing, and training setup "
+        "exactly, removing only the residual/skip-connection additions (plus the "
+        "handful of 1x1 downsample-shortcut projections ResNet has and this "
+        "backbone structurally cannot) -- this is the controlled comparison that "
+        "actually isolates what residual connections contribute here.\n"
+    )
+    lines.append(_backbone_comparison_interpretation(plain_metrics, resnet_metrics))
+
+    no_zero_init_metrics = _load_merged_experiment_metrics(outputs_dir, _RESNET_NO_ZERO_INIT_EXPERIMENT)
+    lines.append("### Custom ResNet-18 vs Custom ResNet-18 (no zero-init residual) -- zero-init ablation\n")
+    if no_zero_init_metrics is None:
+        lines.append(
+            _MISSING.format(cmd=f"python scripts/run_experiments.py --only {_RESNET_NO_ZERO_INIT_EXPERIMENT}") + "\n"
+        )
+    else:
+        lines.append(
+            "Same architecture, seeds, and training setup as Custom ResNet-18, with "
+            "`model.backbone.zero_init_residual=false` -- isolates the effect of "
+            "zero-initializing each residual branch's final normalization layer "
+            "(a common ResNet training trick) specifically, separate from the "
+            "presence of the residual connections themselves. See "
+            "`docs/experiment_plan.md` for why PlainDeep18NoSkip vs. this variant "
+            "tests residual shortcuts more cleanly than PlainDeep18NoSkip vs. the "
+            "default (zero-init) ResNet.\n"
+        )
+        lines.append(_backbone_comparison_interpretation(resnet_metrics, no_zero_init_metrics))
     return "\n".join(lines)
 
 
@@ -200,15 +310,26 @@ def generate_markdown_report(outputs_dir: str | Path) -> str:
     else:
         sections.append(_MISSING.format(cmd="make experiments && make architecture-report") + "\n")
 
-    knn_path = outputs_dir / "knn" / "parametric_vs_knn.csv"
-    knn_df = _read_csv(knn_path)
+    # The k-NN comparison table's real path is recorded in the evaluated
+    # checkpoint's own test-metrics JSON (metrics["knn_comparison_table_path"],
+    # written by scripts/evaluate.py --compare-knn under that checkpoint's
+    # own isolated knn/ directory) -- never a single hardcoded global
+    # outputs/knn/parametric_vs_knn.csv path, which no longer exists once
+    # each experiment/seed's k-NN table is isolated.
+    resnet_metrics_for_knn = _load_merged_experiment_metrics(outputs_dir, _RESNET_EXPERIMENT) or {}
+    knn_table_path = resnet_metrics_for_knn.get("knn_comparison_table_path")
+    knn_df = _read_csv(Path(knn_table_path)) if knn_table_path else None
     sections.append("### Parametric vs k-NN\n")
     if knn_df is not None:
         sections.append(_df_to_md_table(knn_df) + "\n")
     else:
-        sections.append(_MISSING.format(cmd="make build-knn && make evaluate") + "\n")
+        sections.append(
+            _MISSING.format(
+                cmd="make build-knn && python scripts/evaluate.py --checkpoint <resnet checkpoint> --compare-knn"
+            ) + "\n"
+        )
 
-    # Plain CNN vs Custom ResNet-18 backbone comparison
+    # Backbone comparison (SimpleCNN / PlainDeep18NoSkip / Custom ResNet-18)
     sections.append(build_backbone_comparison_section(outputs_dir))
 
     # Gradient interference

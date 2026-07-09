@@ -9,6 +9,7 @@ for reproducibility.
 from __future__ import annotations
 
 import io
+import itertools
 import random
 
 import numpy as np
@@ -117,6 +118,48 @@ def apply_corruption(image: Image.Image, name: str, param: float, seed: int = 0)
     return _CORRUPTION_FUNCS[name](image, param, seed=seed)
 
 
+_DEFAULT_AGE_BUCKET_EDGES = (0, 13, 20, 35, 50, 65, 200)
+
+
+def stratified_sample(
+    df: pd.DataFrame, max_samples: int | None, seed: int = 42,
+    age_bucket_edges: tuple[int, ...] = _DEFAULT_AGE_BUCKET_EDGES,
+) -> pd.DataFrame:
+    """Deterministic stratified sample over (age bucket, gender label) strata.
+
+    Used instead of ``df.head(max_samples)`` for robustness evaluation --
+    the first N rows of a prepared split CSV are not a random or
+    representative sample, so truncating to them would silently bias the
+    corruption evaluation toward whatever subgroup happens to sort first.
+    Samples proportionally to each stratum's share of ``df`` (deterministic
+    given ``seed``, so repeat runs pick the same rows). Returns ``df``
+    unchanged (in its original row order) if ``max_samples`` is ``None`` or
+    already covers the whole split.
+    """
+    if max_samples is None or max_samples >= len(df):
+        return df.reset_index(drop=True)
+
+    working = df.reset_index(drop=True).copy()
+    age_bucket = pd.cut(working["age"], bins=list(age_bucket_edges), right=False)
+    gender = working["gender_label"].astype("object").where(working["gender_label"].notna(), "missing")
+    strata = list(zip(age_bucket.astype(str), gender.astype(str)))
+
+    rng = np.random.default_rng(seed)
+    frac = max_samples / len(working)
+    parts = []
+    working["_stratum"] = strata
+    for _, group in working.groupby("_stratum", sort=True):
+        n = min(int(round(len(group) * frac)), len(group))
+        if n <= 0:
+            continue
+        idx = rng.choice(group.index.to_numpy(), size=n, replace=False)
+        parts.append(group.loc[sorted(idx)])
+    if not parts:
+        return working.drop(columns="_stratum").iloc[0:0]
+    sampled = pd.concat(parts).drop(columns="_stratum")
+    return sampled.sort_index().reset_index(drop=True)
+
+
 def iter_corruption_configs(robustness_cfg: dict):
     """Yield (corruption_name, severity_level, param_value) tuples from the config."""
     for name, spec in robustness_cfg["corruptions"].items():
@@ -156,14 +199,26 @@ def evaluate_condition(
     param: float | None,
     seed: int,
     batch_size: int = 32,
+    calibration_offset: float | None = None,
 ):
     """Run the model over ``df`` with an optional corruption applied, returning a metrics dict.
 
     ``corruption_name=None`` evaluates the clean (uncorrupted) baseline.
+    ``calibration_offset``, when given, is the *fixed* conformal offset
+    already fit on the clean calibration split (see
+    ``src/evaluation/calibration.py:fit_conformal_offset``) -- it is only
+    ever applied here, never refit on corrupted data, since re-fitting per
+    corruption would answer a different question ("how wide would a
+    calibration fit on this corruption need to be") than the one this
+    evaluation asks ("how much does the clean-fit calibration's coverage
+    guarantee degrade under distribution shift"). Both raw and
+    (if ``calibration_offset`` is given) calibrated coverage/width are
+    reported side by side so that degradation is visible in both.
     """
     import torch
     from PIL import Image
 
+    from src.evaluation.calibration import apply_conformal_offset
     from src.evaluation.metrics import (
         abstention_rate, age_mae, age_rmse, gender_accuracy, interval_coverage, mean_interval_width,
     )
@@ -213,6 +268,10 @@ def evaluate_condition(
         metrics["age_rmse"] = age_rmse(ages[age_valid], q50[age_valid])
         metrics["interval_coverage"] = interval_coverage(ages[age_valid], q10[age_valid], q90[age_valid])
         metrics["mean_interval_width"] = mean_interval_width(q10[age_valid], q90[age_valid])
+        if calibration_offset is not None:
+            q10_cal, q90_cal = apply_conformal_offset(q10[age_valid], q90[age_valid], calibration_offset)
+            metrics["interval_coverage_calibrated"] = interval_coverage(ages[age_valid], q10_cal, q90_cal)
+            metrics["mean_interval_width_calibrated"] = mean_interval_width(q10_cal, q90_cal)
     if gender_valid.any():
         combined_abstain = abstain[gender_valid]
         metrics["gender_accuracy"] = gender_accuracy(
@@ -223,7 +282,11 @@ def evaluate_condition(
     return metrics
 
 
-_DEGRADATION_METRICS = ("age_mae", "age_rmse", "interval_coverage", "mean_interval_width", "gender_accuracy", "abstention_rate")
+_DEGRADATION_METRICS = (
+    "age_mae", "age_rmse", "interval_coverage", "mean_interval_width",
+    "interval_coverage_calibrated", "mean_interval_width_calibrated",
+    "gender_accuracy", "abstention_rate",
+)
 
 
 def compute_degradation(results_df: pd.DataFrame, metrics: tuple[str, ...] = _DEGRADATION_METRICS) -> pd.DataFrame:
@@ -257,31 +320,36 @@ def compute_degradation(results_df: pd.DataFrame, metrics: tuple[str, ...] = _DE
 
 
 def build_robustness_diff_table(results_by_model: dict[str, pd.DataFrame], metrics: tuple[str, ...] = _DEGRADATION_METRICS) -> pd.DataFrame:
-    """One row per (corruption, severity), columns = each model's value and the direct model-vs-model difference.
+    """One row per (corruption, severity, model pair): every pairwise model comparison.
 
-    Requires exactly two models (the direct ResNet-vs-CNN comparison the
-    spec asks for); with more than two, only the first two (by dict
-    insertion order) are compared directly, since a single "difference"
-    column is only meaningful pairwise.
+    With exactly two models this produces the same single-pair columns as
+    before (backward compatible). With more than two models (e.g.
+    SimpleCNN, PlainDeep18NoSkip, Custom ResNet-18) this produces *all*
+    ``C(n, 2)`` pairwise comparisons -- concatenated, with an added
+    ``comparison`` column identifying which pair each row is -- rather
+    than silently comparing only the first two models by dict insertion
+    order and dropping the rest. In particular this guarantees SimpleCNN
+    vs ResNet, PlainDeep18NoSkip vs ResNet, and SimpleCNN vs
+    PlainDeep18NoSkip are all present when all three models are supplied.
     """
     names = list(results_by_model)
     if len(names) < 2:
         raise ValueError("build_robustness_diff_table needs at least two models to compare")
-    name_a, name_b = names[0], names[1]
-    df_a = results_by_model[name_a].set_index(["corruption", "severity"])
-    df_b = results_by_model[name_b].set_index(["corruption", "severity"])
 
     rows = []
-    for key in df_a.index:
-        if key not in df_b.index:
-            continue
-        row = {"corruption": key[0], "severity": key[1]}
-        for metric in metrics:
-            if metric not in df_a.columns or metric not in df_b.columns:
+    for name_a, name_b in itertools.combinations(names, 2):
+        df_a = results_by_model[name_a].set_index(["corruption", "severity"])
+        df_b = results_by_model[name_b].set_index(["corruption", "severity"])
+        for key in df_a.index:
+            if key not in df_b.index:
                 continue
-            value_a, value_b = df_a.loc[key, metric], df_b.loc[key, metric]
-            row[f"{name_a}_{metric}"] = value_a
-            row[f"{name_b}_{metric}"] = value_b
-            row[f"diff_{metric}_({name_b}_minus_{name_a})"] = value_b - value_a
-        rows.append(row)
+            row = {"corruption": key[0], "severity": key[1], "comparison": f"{name_b}_vs_{name_a}"}
+            for metric in metrics:
+                if metric not in df_a.columns or metric not in df_b.columns:
+                    continue
+                value_a, value_b = df_a.loc[key, metric], df_b.loc[key, metric]
+                row[f"{name_a}_{metric}"] = value_a
+                row[f"{name_b}_{metric}"] = value_b
+                row[f"diff_{metric}_({name_b}_minus_{name_a})"] = value_b - value_a
+            rows.append(row)
     return pd.DataFrame(rows)

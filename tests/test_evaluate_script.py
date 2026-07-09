@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -77,7 +78,7 @@ from evaluate import evaluate_checkpoint  # noqa: E402
 from src.data.dataset import FaceMultiTaskDataset  # noqa: E402
 from src.data.split_utils import split_dataframe  # noqa: E402
 from src.data.transforms import EvalTransform, TrainTransform  # noqa: E402
-from src.evaluation.calibration import fit_and_save_calibration  # noqa: E402
+from src.evaluation.calibration import CalibrationMismatchError, fit_and_save_calibration  # noqa: E402
 from src.evaluation.knn_baseline import KNNEmbeddingBaseline  # noqa: E402
 from src.models.multitask_model import build_multitask_model  # noqa: E402
 from src.training.trainer import Trainer  # noqa: E402
@@ -136,7 +137,8 @@ def _train_and_prepare_one_experiment(tmp_path, synthetic_metadata_df, tiny_conf
     knn_path = exp_root / "knn" / "knn_baseline.pkl"
     knn_baseline.save(knn_path)
 
-    # Fit a real conformal calibration artifact (alpha=0.10 -> target_coverage=0.90).
+    # Fit a real conformal calibration artifact (alpha=0.10 -> target_coverage=0.90),
+    # with full provenance so cross-experiment contamination can be detected.
     cal_q10, cal_q90, cal_ages = [], [], []
     with torch.no_grad():
         for i in range(len(calibration_dataset)):
@@ -145,9 +147,12 @@ def _train_and_prepare_one_experiment(tmp_path, synthetic_metadata_df, tiny_conf
             cal_q10.append(out["q10"].item())
             cal_q90.append(out["q90"].item())
             cal_ages.append(row["age"].item())
+    test_df = df[df["split"] == "test"]
     fit_and_save_calibration(
         np.array(cal_ages), np.array(cal_q10), np.array(cal_q90),
         alpha=0.10, output_dir=exp_root / "calibration",
+        checkpoint_path=checkpoint_path, split_csv_path=splits_dir / "full_metadata_with_splits.csv",
+        test_sample_ids=test_df["image_path"].tolist(), experiment=experiment_name, seed=seed,
     )
 
     return checkpoint_path, knn_path
@@ -203,3 +208,50 @@ def test_evaluate_checkpoint_uses_calibration_target_coverage_not_hardcoded(
     )
 
     assert captured.get("target_coverage") == 0.90
+
+
+def test_evaluate_checkpoint_rejects_cross_experiment_calibration_contamination(
+    tmp_path, synthetic_metadata_df, tiny_config,
+):
+    """Regression test: evaluating experiment A's checkpoint against
+    experiment B's calibration artifact (e.g. from an accidental shared
+    calibration_dir, or copy-paste of the wrong path) must fail loudly
+    instead of silently applying the wrong conformal offset."""
+    checkpoint_a, _ = _train_and_prepare_one_experiment(tmp_path, synthetic_metadata_df, tiny_config, "exp_cross_a", seed=11)
+    checkpoint_b, _ = _train_and_prepare_one_experiment(tmp_path, synthetic_metadata_df, tiny_config, "exp_cross_b", seed=22)
+
+    with pytest.raises(CalibrationMismatchError):
+        evaluate_checkpoint(
+            str(checkpoint_a), output_name="exp_cross_a_test_metrics",
+            calibration_dir=str(tmp_path / "exp_cross_b" / "calibration"),
+        )
+
+    # The matching calibration_dir must still work (sanity check that the
+    # rejection above is really about the mismatch, not a broken checkpoint/split).
+    metrics = evaluate_checkpoint(
+        str(checkpoint_b), output_name="exp_cross_b_test_metrics",
+        calibration_dir=str(tmp_path / "exp_cross_b" / "calibration"),
+    )
+    assert metrics is not None
+
+
+def test_evaluate_checkpoint_rejects_stale_calibration_after_retraining(
+    tmp_path, synthetic_metadata_df, tiny_config,
+):
+    """Regression test: retraining the same experiment/seed (new random
+    init, e.g. after a code change) produces a new checkpoint whose weights
+    differ from the one the old calibration.json on disk was fit against.
+    Evaluating with the stale calibration artifact must fail loudly rather
+    than silently reuse an offset fit for different model weights."""
+    checkpoint_v1, _ = _train_and_prepare_one_experiment(tmp_path, synthetic_metadata_df, tiny_config, "exp_retrain", seed=7)
+    stale_calibration_dir = tmp_path / "exp_retrain" / "calibration"
+
+    # Simulate retraining in-place: overwrite the checkpoint file's bytes
+    # without re-running scripts/calibrate.py.
+    checkpoint_v1.write_bytes(checkpoint_v1.read_bytes() + b"\x00")
+
+    with pytest.raises(CalibrationMismatchError):
+        evaluate_checkpoint(
+            str(checkpoint_v1), output_name="exp_retrain_test_metrics",
+            calibration_dir=str(stale_calibration_dir),
+        )

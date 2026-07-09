@@ -10,12 +10,13 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 from PIL import Image
 
 from src.evaluation.robustness import (
     CORRUPTION_NAMES, apply_corruption, build_robustness_diff_table, compute_degradation, gaussian_blur,
     gaussian_noise, grayscale, high_brightness, high_contrast, iter_corruption_configs, jpeg_compression,
-    low_brightness, low_contrast, low_resolution, partial_crop, partial_occlusion,
+    low_brightness, low_contrast, low_resolution, partial_crop, partial_occlusion, stratified_sample,
 )
 
 
@@ -178,3 +179,127 @@ def test_build_robustness_diff_table_computes_direct_model_vs_model_difference()
 def test_build_robustness_diff_table_requires_at_least_two_models():
     with pytest.raises(ValueError):
         build_robustness_diff_table({"only_one": _robustness_results_df()})
+
+
+def test_build_robustness_diff_table_produces_all_pairwise_comparisons_for_three_models():
+    """Regression test: with three models, every pairwise comparison must
+    be present -- not just the first two by dict insertion order -- and in
+    particular SimpleCNN vs ResNet, PlainDeep18NoSkip vs ResNet, and
+    SimpleCNN vs PlainDeep18NoSkip must all appear."""
+    df_cnn = _robustness_results_df()
+    df_plain = _robustness_results_df().copy()
+    df_plain["age_mae"] = df_plain["age_mae"] - 0.5
+    df_resnet = _robustness_results_df().copy()
+    df_resnet["age_mae"] = df_resnet["age_mae"] - 1.0
+
+    diff_table = build_robustness_diff_table({
+        "simple_cnn": df_cnn, "plain_deep18_no_skip": df_plain, "custom_resnet18": df_resnet,
+    })
+
+    assert set(diff_table["comparison"].unique()) == {
+        "plain_deep18_no_skip_vs_simple_cnn", "custom_resnet18_vs_simple_cnn", "custom_resnet18_vs_plain_deep18_no_skip",
+    }
+    # 3 pairs x 3 (corruption, severity) rows each.
+    assert len(diff_table) == 9
+
+    resnet_vs_cnn = diff_table[diff_table["comparison"] == "custom_resnet18_vs_simple_cnn"]
+    row = resnet_vs_cnn[(resnet_vs_cnn["corruption"] == "gaussian_blur") & (resnet_vs_cnn["severity"] == 2)].iloc[0]
+    assert row["diff_age_mae_(custom_resnet18_minus_simple_cnn)"] == pytest.approx(-1.0)
+
+
+def _synthetic_split_df(n=400, seed=0):
+    rng = np.random.default_rng(seed)
+    return pd.DataFrame({
+        "image_path": [f"img_{i}.jpg" for i in range(n)],
+        "age": rng.uniform(0, 90, n),
+        "gender_label": rng.integers(0, 2, n),
+    })
+
+
+def test_stratified_sample_returns_full_df_when_max_samples_covers_it():
+    df = _synthetic_split_df(50)
+    sampled = stratified_sample(df, max_samples=None)
+    assert len(sampled) == 50
+    sampled = stratified_sample(df, max_samples=1000)
+    assert len(sampled) == 50
+
+
+def test_stratified_sample_respects_approximate_max_samples_and_is_deterministic():
+    df = _synthetic_split_df(400)
+    sampled_1 = stratified_sample(df, max_samples=100, seed=42)
+    sampled_2 = stratified_sample(df, max_samples=100, seed=42)
+    # Rounding per stratum means this is approximate, not exact.
+    assert 80 <= len(sampled_1) <= 120
+    assert list(sampled_1["image_path"]) == list(sampled_2["image_path"])
+
+
+def test_stratified_sample_covers_every_gender_label_present():
+    """A naive head(max_samples) could silently drop an entire subgroup if
+    the split CSV happens to be sorted/grouped -- stratified sampling must
+    not do that as long as the subgroup has enough rows to be represented."""
+    df = _synthetic_split_df(400)
+    sampled = stratified_sample(df, max_samples=200, seed=1)
+    assert set(sampled["gender_label"].unique()) == set(df["gender_label"].unique())
+
+
+def test_stratified_sample_different_seeds_pick_different_rows():
+    df = _synthetic_split_df(400)
+    sampled_a = stratified_sample(df, max_samples=100, seed=1)
+    sampled_b = stratified_sample(df, max_samples=100, seed=2)
+    assert list(sampled_a["image_path"]) != list(sampled_b["image_path"])
+
+
+class _FakeQuantileModel:
+    """Minimal stand-in for MultiTaskFaceModel: fixed q10/q50/q90 and gender
+    logits regardless of input, so evaluate_condition's calibration-offset
+    wiring can be tested without a real trained checkpoint."""
+
+    def eval(self):
+        return self
+
+    def __call__(self, images):
+        n = images.shape[0]
+        return {
+            "age_output": {
+                "q10": torch.full((n,), 20.0), "q50": torch.full((n,), 25.0), "q90": torch.full((n,), 30.0),
+            },
+            "gender_logits": torch.zeros((n, 2)),
+        }
+
+
+def test_evaluate_condition_reports_calibrated_coverage_and_width_alongside_raw(tmp_path):
+    from src.data.transforms import EvalTransform
+    from src.evaluation.robustness import evaluate_condition
+
+    rows = []
+    for i in range(6):
+        path = tmp_path / f"img_{i}.png"
+        Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8)).save(path)
+        rows.append({"image_path": str(path), "age": 25.0, "gender_label": 0})
+    df = pd.DataFrame(rows)
+
+    metrics = evaluate_condition(
+        _FakeQuantileModel(), df, EvalTransform(32), device="cpu", gender_confidence_threshold=0.80,
+        corruption_name=None, severity=0, param=None, seed=0, calibration_offset=5.0,
+    )
+
+    assert metrics["mean_interval_width"] == pytest.approx(10.0)  # raw: 30 - 20
+    assert metrics["mean_interval_width_calibrated"] == pytest.approx(20.0)  # (30+5) - (20-5)
+    assert metrics["interval_coverage"] == pytest.approx(1.0)  # age=25 is inside [20, 30]
+    assert metrics["interval_coverage_calibrated"] == pytest.approx(1.0)
+
+
+def test_evaluate_condition_omits_calibrated_keys_without_an_offset(tmp_path):
+    from src.data.transforms import EvalTransform
+    from src.evaluation.robustness import evaluate_condition
+
+    path = tmp_path / "img_0.png"
+    Image.fromarray(np.zeros((32, 32, 3), dtype=np.uint8)).save(path)
+    df = pd.DataFrame([{"image_path": str(path), "age": 25.0, "gender_label": 0}])
+
+    metrics = evaluate_condition(
+        _FakeQuantileModel(), df, EvalTransform(32), device="cpu", gender_confidence_threshold=0.80,
+        corruption_name=None, severity=0, param=None, seed=0,
+    )
+    assert "interval_coverage_calibrated" not in metrics
+    assert "mean_interval_width_calibrated" not in metrics

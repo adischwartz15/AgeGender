@@ -57,21 +57,40 @@ def _md_image(path: Path, report_dir: Path, label: str) -> str:
     return f"![{label}]({Path(rel).as_posix()})\n"
 
 
-def _discover_seed_metrics(metrics_dir: Path) -> dict[str, list[dict]]:
+def _discover_seed_metrics(outputs_dir: Path) -> dict[str, list[dict]]:
+    """Group every ``{experiment}_seed{N}_test_metrics.json`` found by experiment name.
+
+    Searches both the flat legacy ``outputs/metrics`` directory and every
+    isolated ``experiments/<experiment>/seed_<seed>/metrics`` directory
+    produced by ``scripts/run_seeds.py`` (see
+    ``src/evaluation/reports.py:_experiment_metrics_dirs`` and
+    ``src/utils/experiment_paths.py``) -- a seed's metrics file keeps this
+    same filename regardless of which directory it physically lives under.
+    """
+    from src.evaluation.reports import _experiment_metrics_dirs
+
     groups: dict[str, list[dict]] = {}
-    for f in sorted(metrics_dir.glob("*_seed*_test_metrics.json")):
-        match = _SEED_GROUP_RE.match(f.name)
-        if not match:
+    seen_files: set[str] = set()
+    for metrics_dir in _experiment_metrics_dirs(outputs_dir):
+        if not metrics_dir.exists():
             continue
-        data = _read_json(f)
-        if data is not None:
-            groups.setdefault(match.group("experiment"), []).append(data)
+        for f in sorted(metrics_dir.glob("*_seed*_test_metrics.json")):
+            match = _SEED_GROUP_RE.match(f.name)
+            if not match or f.name in seen_files:
+                continue
+            data = _read_json(f)
+            if data is not None:
+                groups.setdefault(match.group("experiment"), []).append(data)
+                seen_files.add(f.name)
     return groups
 
 
-def _find_primary_test_metrics(metrics_dir: Path) -> tuple[str | None, dict | None]:
+def _find_primary_test_metrics(outputs_dir: Path) -> tuple[str | None, dict | None]:
+    from src.evaluation.reports import _experiment_metrics_dirs, _read_json_from_any
+
+    dirs = _experiment_metrics_dirs(outputs_dir)
     for name in _PRIMARY_EXPERIMENT_CANDIDATES:
-        data = _read_json(metrics_dir / f"{name}_test_metrics.json")
+        data = _read_json_from_any(dirs, f"{name}_test_metrics.json")
         if data is not None:
             return name, data
     return None, None
@@ -90,7 +109,7 @@ def _build_ablation_section(outputs_dir: Path) -> str:
 
 def _build_seed_aggregate_section(outputs_dir: Path) -> str:
     lines = ["## Mean +/- Std Across Seeds\n"]
-    groups = _discover_seed_metrics(outputs_dir / "metrics")
+    groups = _discover_seed_metrics(outputs_dir)
     if not groups:
         lines.append(
             _MISSING.format(cmd="python scripts/run_seeds.py --experiment <name> --seeds 42,43,44") + "\n"
@@ -111,7 +130,7 @@ def _build_seed_aggregate_section(outputs_dir: Path) -> str:
 
 
 def _build_seed_plots(outputs_dir: Path, report_dir: Path) -> str:
-    groups = _discover_seed_metrics(outputs_dir / "metrics")
+    groups = _discover_seed_metrics(outputs_dir)
     if not groups:
         return ""
     aggregates = {name: aggregate_seed_metrics(seed_metrics) for name, seed_metrics in groups.items()}
@@ -147,8 +166,7 @@ def _build_uncertainty_section(outputs_dir: Path, report_dir: Path) -> str:
         "not assumed away.\n"
     )
 
-    metrics_dir = outputs_dir / "metrics"
-    primary_name, primary_metrics = _find_primary_test_metrics(metrics_dir)
+    primary_name, primary_metrics = _find_primary_test_metrics(outputs_dir)
     if primary_metrics is None:
         lines.append(_MISSING.format(cmd="python scripts/evaluate.py --checkpoint <primary checkpoint>") + "\n")
         return "\n".join(lines)
@@ -173,14 +191,16 @@ def _build_uncertainty_section(outputs_dir: Path, report_dir: Path) -> str:
             "then re-run `python scripts/evaluate.py` against the same checkpoint._\n"
         )
 
-    plots_dir = outputs_dir / "plots"
+    from src.evaluation.reports import _experiment_search_dirs
+
+    plots_dirs = _experiment_search_dirs(outputs_dir, "plots")
     plot_specs = (
         (f"{primary_name}_test_metrics_interval_coverage.png", "Empirical interval coverage by age bucket"),
         (f"{primary_name}_test_metrics_interval_width_by_bucket.png", "Interval width by age bucket"),
         (f"{primary_name}_test_metrics_coverage_width_tradeoff.png", "Coverage-width trade-off before/after conformal calibration"),
     )
     for filename, label in plot_specs:
-        path = plots_dir / filename
+        path = next((d / filename for d in plots_dirs if (d / filename).exists()), plots_dirs[0] / filename)
         if path.exists():
             lines.append(_md_image(path, report_dir, label))
         else:
@@ -200,28 +220,57 @@ def _build_uncertainty_section(outputs_dir: Path, report_dir: Path) -> str:
 
 def _build_robustness_section(outputs_dir: Path, report_dir: Path) -> str:
     lines = ["## Robustness Degradation\n"]
-    df = _read_csv(outputs_dir / "robustness" / "robustness_results.csv")
-    if df is None:
+
+    diff_table = _read_csv(outputs_dir / "backbone_comparison" / "robustness_diff_table.csv")
+    if diff_table is not None:
+        lines.append(
+            "**All pairwise model robustness comparisons** (one row per corruption, "
+            "severity, and model pair -- see `scripts/compare_backbones.py --robustness-csv`):\n\n"
+            + _df_to_md_table(diff_table) + "\n"
+        )
+    else:
+        lines.append(
+            "_Pairwise robustness comparison not yet generated. Run "
+            "`python scripts/run_robustness.py --checkpoint <checkpoint>` for each model, then "
+            "`python scripts/compare_backbones.py --robustness-csv NAME=path/to/robustness_results.csv ...` "
+            "for all of them together._\n"
+        )
+
+    from src.evaluation.reports import _experiment_search_dirs
+
+    robustness_dirs = _experiment_search_dirs(outputs_dir, "robustness")
+    found_any = False
+    for robustness_dir in robustness_dirs:
+        df = _read_csv(robustness_dir / "robustness_results.csv")
+        if df is None:
+            continue
+        found_any = True
+        label = robustness_dir.parent.parent.name if robustness_dir.parent.name != "outputs" else "outputs/robustness"
+        lines.append(f"### {label}\n")
+        clean = df[df["corruption"] == "clean"]
+        if not clean.empty:
+            lines.append("**Clean baseline**\n\n" + _df_to_md_table(clean) + "\n")
+        corrupted = df[df["corruption"] != "clean"]
+        summary_cols = [
+            c for c in (
+                "age_mae", "gender_accuracy", "abstention_rate", "mean_confidence",
+                "mean_interval_width", "interval_coverage_calibrated", "mean_interval_width_calibrated",
+            )
+            if c in df.columns
+        ]
+        if not corrupted.empty and summary_cols:
+            summary = corrupted.groupby("corruption")[summary_cols].mean().reset_index()
+            lines.append("**Mean metrics by corruption type (across severities)**\n\n" + _df_to_md_table(summary) + "\n")
+        for metric in ("age_mae", "gender_accuracy", "abstention_rate"):
+            plot_path = robustness_dir / f"robustness_{metric}.png"
+            if plot_path.exists():
+                lines.append(_md_image(plot_path, report_dir, f"{label}: robustness curve ({metric})"))
+            degradation_plot_path = robustness_dir / f"degradation_{metric}_pct_change.png"
+            if degradation_plot_path.exists():
+                lines.append(_md_image(degradation_plot_path, report_dir, f"{label}: degradation vs. severity ({metric} % change)"))
+
+    if not found_any and diff_table is None:
         lines.append(_MISSING.format(cmd="python scripts/run_robustness.py --checkpoint <checkpoint>") + "\n")
-        return "\n".join(lines)
-
-    clean = df[df["corruption"] == "clean"]
-    lines.append("**Clean baseline**\n\n" + _df_to_md_table(clean) + "\n")
-
-    corrupted = df[df["corruption"] != "clean"]
-    summary_cols = [
-        c for c in ("age_mae", "gender_accuracy", "abstention_rate", "mean_confidence", "mean_interval_width")
-        if c in df.columns
-    ]
-    if not corrupted.empty and summary_cols:
-        summary = corrupted.groupby("corruption")[summary_cols].mean().reset_index()
-        lines.append("**Mean metrics by corruption type (across severities)**\n\n" + _df_to_md_table(summary) + "\n")
-
-    robustness_dir = outputs_dir / "robustness"
-    for metric in ("age_mae", "gender_accuracy", "abstention_rate"):
-        plot_path = robustness_dir / f"robustness_{metric}.png"
-        if plot_path.exists():
-            lines.append(_md_image(plot_path, report_dir, f"Robustness degradation curve: {metric}"))
     return "\n".join(lines)
 
 
@@ -253,28 +302,49 @@ def _build_parameter_latency_section(outputs_dir: Path, report_dir: Path) -> str
 
 
 def _build_findings_section(outputs_dir: Path) -> str:
+    from src.evaluation.reports import _PLAIN_DEEP18_EXPERIMENT, _experiment_search_dirs
+
     findings = []
 
     cnn_metrics = _load_merged_experiment_metrics(outputs_dir, _CNN_EXPERIMENT)
+    plain_metrics = _load_merged_experiment_metrics(outputs_dir, _PLAIN_DEEP18_EXPERIMENT)
     resnet_metrics = _load_merged_experiment_metrics(outputs_dir, _RESNET_EXPERIMENT)
-    if (
-        cnn_metrics and resnet_metrics
-        and cnn_metrics.get("age_mae") is not None and resnet_metrics.get("age_mae") is not None
-    ):
-        findings.append(_backbone_comparison_interpretation(cnn_metrics, resnet_metrics).strip())
 
-    df = _read_csv(outputs_dir / "robustness" / "robustness_results.csv")
-    if df is not None and "age_mae" in df.columns:
+    if cnn_metrics and resnet_metrics and cnn_metrics.get("age_mae") is not None and resnet_metrics.get("age_mae") is not None:
+        findings.append(
+            "**Efficiency/accuracy trade-off (SimpleCNN vs. Custom ResNet-18, *not* a residual-connection "
+            "ablation -- depth and width differ too):** " + _backbone_comparison_interpretation(cnn_metrics, resnet_metrics).strip()
+        )
+    if plain_metrics and resnet_metrics and plain_metrics.get("age_mae") is not None and resnet_metrics.get("age_mae") is not None:
+        findings.append(
+            "**Residual-connection ablation (PlainDeep18NoSkip vs. Custom ResNet-18, depth/width held fixed):** "
+            + _backbone_comparison_interpretation(plain_metrics, resnet_metrics).strip()
+        )
+
+    interpretation_path = outputs_dir / "backbone_comparison" / "final_interpretation.md"
+    if interpretation_path.exists():
+        findings.append(
+            "**Selective-risk (AURC) comparison:** see the \"Selective-Risk (AURC) Comparison and Final "
+            "Interpretation\" section below for the statistically-gated verdict on whether ResNet's added "
+            "complexity is justified."
+        )
+
+    for robustness_dir in _experiment_search_dirs(outputs_dir, "robustness"):
+        df = _read_csv(robustness_dir / "robustness_results.csv")
+        if df is None or "age_mae" not in df.columns:
+            continue
         clean_row = df[df["corruption"] == "clean"]
         corrupted = df[df["corruption"] != "clean"]
-        if not clean_row.empty and not corrupted.empty:
-            clean_mae = float(clean_row.iloc[0]["age_mae"])
-            worst = corrupted.loc[corrupted["age_mae"].idxmax()]
-            findings.append(
-                f"Under the measured corruptions, age MAE degraded from {clean_mae:.2f} years (clean) to "
-                f"as much as {float(worst['age_mae']):.2f} years under '{worst['corruption']}' at severity "
-                f"{int(worst['severity'])}, an increase of {float(worst['age_mae']) - clean_mae:.2f} years."
-            )
+        if clean_row.empty or corrupted.empty:
+            continue
+        clean_mae = float(clean_row.iloc[0]["age_mae"])
+        worst = corrupted.loc[corrupted["age_mae"].idxmax()]
+        findings.append(
+            f"Under the measured corruptions, age MAE degraded from {clean_mae:.2f} years (clean) to "
+            f"as much as {float(worst['age_mae']):.2f} years under '{worst['corruption']}' at severity "
+            f"{int(worst['severity'])}, an increase of {float(worst['age_mae']) - clean_mae:.2f} years."
+        )
+        break  # one representative robustness finding is enough here; see the full section above for all models
 
     lines = ["## Evidence-Based Findings\n"]
     if not findings:
@@ -287,6 +357,55 @@ def _build_findings_section(outputs_dir: Path) -> str:
     else:
         for finding in findings:
             lines.append(f"- {finding}\n")
+    return "\n".join(lines)
+
+
+def _build_aurc_comparison_section(outputs_dir: Path) -> str:
+    """Selective-risk (AURC) paired-bootstrap comparison and the final,
+    explicitly conditional interpretation from scripts/compare_backbones.py.
+
+    Only ``pairwise_bootstrap_aurc`` (the CI computed on the AURC summary
+    statistic itself) is rendered as evidence for an AURC claim -- see
+    src/evaluation/backbone_comparison.py:build_final_interpretation.
+    """
+    lines = ["## Selective-Risk (AURC) Comparison and Final Interpretation\n"]
+    comparison_dir = outputs_dir / "backbone_comparison"
+    gender_aurc = _read_json(comparison_dir / "gender_aurc.json")
+    age_aurc = _read_json(comparison_dir / "age_selective_aurc.json")
+    gender_ci = _read_json(comparison_dir / "gender_aurc_bootstrap.json")
+    age_ci = _read_json(comparison_dir / "age_aurc_bootstrap.json")
+
+    if gender_aurc is None and age_aurc is None:
+        lines.append(
+            _MISSING.format(
+                cmd="python scripts/compare_backbones.py --checkpoint NAME=path ... --resnet-name <resnet>"
+            ) + "\n"
+        )
+        return "\n".join(lines)
+
+    if gender_aurc is not None:
+        lines.append("**Gender selective-risk AURC (lower is better)**\n\n" + _dict_to_md_table(gender_aurc["aurc"]) + "\n")
+    if age_aurc is not None:
+        lines.append("**Age selective-MAE AURC (lower is better)**\n\n" + _dict_to_md_table(age_aurc["aurc"]) + "\n")
+
+    for label, ci_data in (("gender", gender_ci), ("age", age_ci)):
+        if not ci_data:
+            continue
+        rows = [
+            {"comparison": f"{other}_vs_primary", **ci}
+            for other, ci in ci_data.items()
+        ]
+        if rows:
+            lines.append(
+                f"**{label.capitalize()} AURC paired bootstrap CI (primary = ResNet)**\n\n"
+                + _df_to_md_table(pd.DataFrame(rows)) + "\n"
+            )
+
+    interpretation_path = comparison_dir / "final_interpretation.md"
+    if interpretation_path.exists():
+        lines.append(interpretation_path.read_text(encoding="utf-8"))
+    else:
+        lines.append(_MISSING.format(cmd="python scripts/compare_backbones.py ...") + "\n")
     return "\n".join(lines)
 
 
@@ -320,6 +439,7 @@ def generate_final_results_report(outputs_dir: str | Path, report_dir: str | Pat
         ),
         _build_ablation_section(outputs_dir),
         build_backbone_comparison_section(outputs_dir),
+        _build_aurc_comparison_section(outputs_dir),
         _build_seed_aggregate_section(outputs_dir),
         _build_seed_plots(outputs_dir, report_dir),
         _build_uncertainty_section(outputs_dir, report_dir),

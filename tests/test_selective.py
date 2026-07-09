@@ -13,7 +13,8 @@ import numpy as np
 import pytest
 
 from src.evaluation.selective import (
-    compute_aurc, paired_bootstrap_risk_diff_ci, risk_at_coverage, selective_risk_coverage_curve,
+    compute_aurc, paired_bootstrap_aurc_diff_ci, paired_bootstrap_risk_diff_ci, risk_at_coverage,
+    selective_risk_coverage_curve,
 )
 
 
@@ -107,6 +108,44 @@ def test_paired_bootstrap_requires_equal_length_inputs():
             np.array([0.9, 0.8]), np.array([0.0, 1.0]),
             np.array([0.9]), np.array([0.0]),
             target_coverage=0.9,
+        )
+
+
+def test_paired_bootstrap_aurc_ci_detects_a_clear_difference():
+    """Same 'obviously different' sanity case as the fixed-coverage version,
+    but for the AURC summary statistic itself (not just one coverage level)
+    -- this is what a claim like "model X has lower AURC" must be backed by."""
+    n = 200
+    rng = np.random.default_rng(1)
+    confidence_a = rng.uniform(0, 1, size=n)
+    confidence_b = rng.uniform(0, 1, size=n)
+    loss_a = np.zeros(n)
+    loss_b = np.ones(n)
+
+    result = paired_bootstrap_aurc_diff_ci(confidence_a, loss_a, confidence_b, loss_b, n_bootstrap=200, seed=0)
+    # AURC integrates from the curve's first (near-zero, not exactly zero)
+    # coverage point to 1.0, so a constant loss=1 model's AURC is just
+    # under 1.0 -- not exactly 1.0.
+    assert result["aurc_diff_b_minus_a"] == pytest.approx(1.0, abs=0.01)
+    assert result["excludes_zero"] is True
+    assert result["ci_lower"] > 0
+
+
+def test_paired_bootstrap_aurc_ci_does_not_exclude_zero_for_identical_models():
+    n = 200
+    rng = np.random.default_rng(2)
+    confidence = rng.uniform(0, 1, size=n)
+    loss = rng.integers(0, 2, size=n).astype(float)
+
+    result = paired_bootstrap_aurc_diff_ci(confidence, loss, confidence, loss, n_bootstrap=200, seed=0)
+    assert result["aurc_diff_b_minus_a"] == pytest.approx(0.0)
+    assert result["excludes_zero"] is False
+
+
+def test_paired_bootstrap_aurc_requires_equal_length_inputs():
+    with pytest.raises(ValueError):
+        paired_bootstrap_aurc_diff_ci(
+            np.array([0.9, 0.8]), np.array([0.0, 1.0]), np.array([0.9]), np.array([0.0]),
         )
 
 

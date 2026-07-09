@@ -105,3 +105,48 @@ def paired_bootstrap_risk_diff_ci(
         "excludes_zero": (lower > 0) or (upper < 0),
         "n_bootstrap": n_bootstrap,
     }
+
+
+def paired_bootstrap_aurc_diff_ci(
+    confidence_a: np.ndarray, loss_a: np.ndarray,
+    confidence_b: np.ndarray, loss_b: np.ndarray,
+    n_bootstrap: int = 1000, seed: int = 42, alpha: float = 0.05,
+) -> dict:
+    """Paired bootstrap confidence interval for (AURC_b - AURC_a), the scalar summary statistic.
+
+    :func:`paired_bootstrap_risk_diff_ci` only supports a claim about risk
+    *at one fixed coverage level*; it is not evidence about the AURC
+    summary statistic itself (the area under the *whole* risk-coverage
+    curve). A claim like "model B has a statistically lower AURC than
+    model A" must be backed by a CI computed on AURC directly, which is
+    what this function provides -- same paired-resampling logic (both
+    models resampled with identical bootstrap indices each iteration,
+    valid only because both were evaluated on the identical,
+    index-aligned test set).
+    """
+    if len(confidence_a) != len(confidence_b):
+        raise ValueError("Paired bootstrap requires both models to share the same (index-aligned) test samples")
+    n = len(confidence_a)
+    rng = np.random.default_rng(seed)
+
+    aurc_a_point = compute_aurc(*selective_risk_coverage_curve(confidence_a, loss_a))
+    aurc_b_point = compute_aurc(*selective_risk_coverage_curve(confidence_b, loss_b))
+
+    diffs = np.empty(n_bootstrap)
+    for i in range(n_bootstrap):
+        idx = rng.integers(0, n, size=n)
+        aurc_a = compute_aurc(*selective_risk_coverage_curve(confidence_a[idx], loss_a[idx]))
+        aurc_b = compute_aurc(*selective_risk_coverage_curve(confidence_b[idx], loss_b[idx]))
+        diffs[i] = aurc_b - aurc_a
+
+    lower = float(np.percentile(diffs, 100 * (alpha / 2)))
+    upper = float(np.percentile(diffs, 100 * (1 - alpha / 2)))
+    return {
+        "aurc_a": aurc_a_point,
+        "aurc_b": aurc_b_point,
+        "aurc_diff_b_minus_a": aurc_b_point - aurc_a_point,
+        "ci_lower": lower,
+        "ci_upper": upper,
+        "excludes_zero": (lower > 0) or (upper < 0),
+        "n_bootstrap": n_bootstrap,
+    }

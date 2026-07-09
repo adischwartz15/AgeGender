@@ -92,6 +92,33 @@ python scripts/compare_backbones.py \
     --resnet-name custom_resnet18 --output-dir outputs/backbone_comparison
 ```
 
+## Experiment 0c -- Custom ResNet-18, no zero-init residual (`exp_0c_custom_resnet18_no_zero_init_shared_adapters_learned_balance`)
+
+The recommended architecture control: identical to Experiment D in every
+respect (architecture, adapters, learned loss balancing, seeds, training
+setup) except `model.backbone.zero_init_residual=false` -- each residual
+branch's final BatchNorm keeps its default init (weight=1) instead of
+being zeroed. This is orthogonal to "does the residual connection exist at
+all" (Experiment 0b's question) and isolates a specific, common ResNet
+training trick instead:
+
+- **PlainDeep18NoSkip vs. Experiment 0c** tests residual shortcuts more
+  cleanly than PlainDeep18NoSkip vs. Experiment D, because PlainDeep18NoSkip
+  and Experiment 0c both use non-zero-init residual-branch normalization --
+  Experiment D additionally differs by zero-initializing its residual
+  branches, which is a second, confounding variable if PlainDeep18NoSkip is
+  only ever compared against Experiment D.
+- **Experiment D vs. Experiment 0c** isolates the effect of zero-initialized
+  residual branches on their own, holding the presence of the residual
+  connections themselves fixed.
+
+Experiment D (the project's actual reported ResNet configuration, with
+`zero_init_residual: true`) is never changed by adding this control.
+
+```
+python scripts/run_experiments.py --only exp_0c_custom_resnet18_no_zero_init_shared_adapters_learned_balance
+```
+
 ## Experiment A -- Separate models (`exp_a_separate`)
 
 Two independent Custom ResNet-18 backbones, one trained only for age, one
@@ -148,8 +175,8 @@ because self-supervised pretraining is comparatively compute-hungry (see
   (Custom ResNet-18) should show a meaningfully lower age MAE and/or
   higher gender-label accuracy than Experiment 0 (plain CNN) at a
   comparable or modestly higher parameter/latency cost -- not just a
-  cheaper model that happens to be worse. See the auto-generated "Plain
-  CNN vs Custom ResNet-18 Backbone Comparison" section of
+  cheaper model that happens to be worse. See the auto-generated "Backbone
+  Comparison (SimpleCNN / PlainDeep18NoSkip / Custom ResNet-18)" section of
   `docs/architecture_analysis_generated.md` for the actual numbers and a
   factual (non-causal) one-sentence summary. This comparison alone does
   **not** establish that residual connections specifically are what helps

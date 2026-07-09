@@ -48,6 +48,31 @@ experiments:
         loss_balancing:
           mode: learned_uncertainty
 
+  exp_0c_custom_resnet18_no_zero_init_shared_adapters_learned_balance:
+    description: >
+      Same architecture, seeds, and training setup as Experiment D (Custom
+      ResNet-18, shared adapters, learned uncertainty loss balancing), with
+      model.backbone.zero_init_residual=false -- isolates the effect of
+      zero-initializing each residual branch's final normalization layer
+      specifically, separate from the presence of the residual connections
+      themselves. Two comparisons this recommended control enables:
+      PlainDeep18NoSkip vs. this variant tests residual shortcuts more
+      cleanly than PlainDeep18NoSkip vs. the default (zero-init) ResNet
+      (Experiment D), since both share the same non-zero-init residual
+      branch initialization; and Experiment D vs. this variant isolates
+      the effect of zero-initialized residual branches on their own. See
+      docs/experiment_plan.md.
+    overrides:
+      model:
+        architecture: shared_adapters
+        backbone:
+          name: custom_resnet18
+          zero_init_residual: false
+        adapters:
+          enabled: true
+        loss_balancing:
+          mode: learned_uncertainty
+
   exp_a_separate:
     description: >
       Two independent Custom ResNet-18 backbones, one per task, with
@@ -129,6 +154,7 @@ experiments:
 run_order:
   - exp_0_simple_cnn_shared_adapters_learned_balance
   - exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance
+  - exp_0c_custom_resnet18_no_zero_init_shared_adapters_learned_balance
   - exp_a_separate
   - exp_b_shared_no_adapters
   - exp_c_shared_adapters

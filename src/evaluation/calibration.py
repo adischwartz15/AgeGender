@@ -17,16 +17,39 @@ by this procedure actually exists and loaded successfully.
 
 from __future__ import annotations
 
+import hashlib
 import math
 from pathlib import Path
+from typing import Sequence
 
 import numpy as np
 
-from src.utils.io import load_json, save_json
+from src.utils.io import file_sha256, load_json, save_json
+
+
+class CalibrationMismatchError(RuntimeError):
+    """Raised when a loaded calibration artifact's recorded provenance does
+    not match the checkpoint / split file / test-sample-set it is about to
+    be applied to (see :func:`validate_calibration_artifact`)."""
 
 
 def compute_nonconformity_scores(y_true: np.ndarray, q10: np.ndarray, q90: np.ndarray) -> np.ndarray:
     return np.maximum(q10 - y_true, y_true - q90)
+
+
+def compute_ordered_id_hash(ids: Sequence) -> str:
+    """SHA-256 of an ordered sequence of sample identifiers (e.g. image paths).
+
+    Used to detect when a calibration artifact is being applied to a test
+    split whose row order differs from the one it was fit against --
+    equal *counts* are not sufficient evidence the two enumerations are
+    the same set in the same order.
+    """
+    hasher = hashlib.sha256()
+    for sample_id in ids:
+        hasher.update(str(sample_id).encode("utf-8"))
+        hasher.update(b"\n")
+    return hasher.hexdigest()
 
 
 def fit_conformal_offset(scores: np.ndarray, alpha: float = 0.10) -> float:
@@ -43,9 +66,30 @@ def apply_conformal_offset(q10: np.ndarray, q90: np.ndarray, offset: float) -> t
 
 
 def fit_and_save_calibration(
-    y_true_val: np.ndarray, q10_val: np.ndarray, q90_val: np.ndarray, alpha: float, output_dir: str | Path
+    y_true_val: np.ndarray,
+    q10_val: np.ndarray,
+    q90_val: np.ndarray,
+    alpha: float,
+    output_dir: str | Path,
+    *,
+    checkpoint_path: str | Path | None = None,
+    split_csv_path: str | Path | None = None,
+    test_sample_ids: Sequence | None = None,
+    experiment: str | None = None,
+    seed: int | None = None,
 ) -> dict:
-    """Fit conformal calibration on the validation set and save the artifact."""
+    """Fit conformal calibration on the validation set and save the artifact.
+
+    ``checkpoint_path`` / ``split_csv_path`` / ``test_sample_ids`` /
+    ``experiment`` / ``seed`` are optional provenance recorded into the
+    artifact so a later :func:`validate_calibration_artifact` call can
+    detect (and fail loudly on) cross-seed/cross-model contamination --
+    e.g. evaluating one checkpoint against a calibration artifact actually
+    fit for a different checkpoint or a differently-ordered test split.
+    Omitting them keeps this function usable in contexts (tests, ad-hoc
+    analysis) that don't have a real checkpoint/split file on disk; no
+    validation is performed against fields that were never recorded.
+    """
     scores = compute_nonconformity_scores(y_true_val, q10_val, q90_val)
     offset = fit_conformal_offset(scores, alpha)
     artifact = {
@@ -54,6 +98,11 @@ def fit_and_save_calibration(
         "target_coverage": 1 - alpha,
         "offset": offset,
         "n_calibration_samples": int(len(y_true_val)),
+        "experiment": experiment,
+        "seed": seed,
+        "checkpoint_sha256": file_sha256(checkpoint_path) if checkpoint_path is not None else None,
+        "split_csv_sha256": file_sha256(split_csv_path) if split_csv_path is not None else None,
+        "test_sample_id_hash": compute_ordered_id_hash(test_sample_ids) if test_sample_ids is not None else None,
     }
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -67,6 +116,46 @@ def load_calibration(output_dir: str | Path) -> dict | None:
     if not path.exists():
         return None
     return load_json(path)
+
+
+def validate_calibration_artifact(
+    artifact: dict,
+    *,
+    checkpoint_path: str | Path | None = None,
+    split_csv_path: str | Path | None = None,
+    test_sample_ids: Sequence | None = None,
+) -> None:
+    """Fail loudly if ``artifact`` was fit against a different checkpoint, split
+    file, or ordered test-sample set than the ones supplied here.
+
+    This is what stops cross-seed/cross-model calibration contamination:
+    silently applying seed 42's (or model A's) conformal offset to seed
+    123's (or model B's) test predictions just because both calibration
+    artifacts happen to live in a similarly-named directory or have the
+    same array length. Only fields the artifact actually recorded are
+    checked -- an older artifact fit before this provenance existed has
+    those fields as ``None`` and is intentionally not validated (there is
+    nothing on disk yet to compare against).
+    """
+    checks: list[tuple[str, str | None, str]] = []
+    if checkpoint_path is not None:
+        checks.append(("checkpoint_sha256", file_sha256(checkpoint_path), "checkpoint"))
+    if split_csv_path is not None:
+        checks.append(("split_csv_sha256", file_sha256(split_csv_path), "split CSV"))
+    if test_sample_ids is not None:
+        checks.append(("test_sample_id_hash", compute_ordered_id_hash(test_sample_ids), "ordered test-sample IDs"))
+
+    for field, actual_value, label in checks:
+        recorded_value = artifact.get(field)
+        if recorded_value is None:
+            continue  # artifact predates this provenance field -- nothing to compare
+        if recorded_value != actual_value:
+            raise CalibrationMismatchError(
+                f"Calibration artifact mismatch on {label} (field '{field}'): this artifact was "
+                f"fit against a different {label} than the one being evaluated now. Applying it "
+                "would silently use the wrong conformal offset. Re-run scripts/calibrate.py "
+                "against this exact checkpoint and split before evaluating with calibration."
+            )
 
 
 def evaluate_calibration_effect(

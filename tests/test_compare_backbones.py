@@ -13,6 +13,8 @@ import copy
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -26,12 +28,12 @@ from src.models.multitask_model import build_multitask_model  # noqa: E402
 from src.training.trainer import Trainer  # noqa: E402
 
 
-def _train_tiny_checkpoint(tmp_path, synthetic_metadata_df, tiny_config, experiment_name, backbone_name, seed):
-    df = split_dataframe(synthetic_metadata_df, 0.4, 0.2, 0.2, 0.2, seed=seed, subject_level_if_available=False)
+def _train_tiny_checkpoint(tmp_path, splits_dir, tiny_config, experiment_name, backbone_name):
+    # Every checkpoint being compared must share the identical test split --
+    # a paired bootstrap comparison is only valid when both models were
+    # evaluated on the exact same, index-aligned test samples (see
+    # src/evaluation/backbone_comparison.py:_assert_paired_alignment).
     exp_root = tmp_path / experiment_name
-    splits_dir = exp_root / "splits"
-    splits_dir.mkdir(parents=True)
-    df.to_csv(splits_dir / "full_metadata_with_splits.csv", index=False)
 
     config = copy.deepcopy(tiny_config)
     config["model"]["backbone"]["name"] = backbone_name
@@ -39,6 +41,7 @@ def _train_tiny_checkpoint(tmp_path, synthetic_metadata_df, tiny_config, experim
     config["paths"]["output_dir"] = str(exp_root / "output")
     config["paths"]["checkpoint_dir"] = str(exp_root / "checkpoints")
 
+    df = pd.read_csv(splits_dir / "full_metadata_with_splits.csv")
     image_size = config["dataset"]["image_size"]
     train_dataset = FaceMultiTaskDataset(df[df["split"] == "train"], TrainTransform(image_size))
     val_dataset = FaceMultiTaskDataset(df[df["split"] == "validation"], EvalTransform(image_size))
@@ -55,8 +58,13 @@ def _train_tiny_checkpoint(tmp_path, synthetic_metadata_df, tiny_config, experim
 
 
 def test_compare_backbones_end_to_end(tmp_path, synthetic_metadata_df, tiny_config, monkeypatch):
-    cnn_checkpoint = _train_tiny_checkpoint(tmp_path, synthetic_metadata_df, tiny_config, "cmp_cnn", "simple_cnn", seed=10)
-    resnet_checkpoint = _train_tiny_checkpoint(tmp_path, synthetic_metadata_df, tiny_config, "cmp_resnet", "custom_resnet18", seed=11)
+    shared_splits_dir = tmp_path / "shared_splits"
+    shared_splits_dir.mkdir(parents=True)
+    df = split_dataframe(synthetic_metadata_df, 0.4, 0.2, 0.2, 0.2, seed=10, subject_level_if_available=False)
+    df.to_csv(shared_splits_dir / "full_metadata_with_splits.csv", index=False)
+
+    cnn_checkpoint = _train_tiny_checkpoint(tmp_path, shared_splits_dir, tiny_config, "cmp_cnn", "simple_cnn")
+    resnet_checkpoint = _train_tiny_checkpoint(tmp_path, shared_splits_dir, tiny_config, "cmp_resnet", "custom_resnet18")
 
     output_dir = tmp_path / "backbone_comparison"
     argv = [
@@ -72,7 +80,9 @@ def test_compare_backbones_end_to_end(tmp_path, synthetic_metadata_df, tiny_conf
 
     for expected in (
         "clean_test_summary.csv", "gender_risk_at_coverage.csv", "gender_aurc.json",
+        "gender_pairwise_bootstrap.json", "gender_aurc_bootstrap.json",
         "age_selective_mae_at_coverage.csv", "age_selective_aurc.json",
+        "age_pairwise_bootstrap.json", "age_aurc_bootstrap.json",
         "age_bucket_mae.csv", "age_error_percentiles.json", "final_interpretation.md",
     ):
         assert (output_dir / expected).exists(), f"missing artifact: {expected}"
