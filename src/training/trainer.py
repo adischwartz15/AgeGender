@@ -213,6 +213,7 @@ class Trainer:
         gender_correct, gender_total = 0, 0
         gender_correct_accepted, gender_total_accepted = 0, 0
         gender_confidences = []
+        any_optimizer_step = False
 
         loss_cfg = self.config["model"]["loss_balancing"]
         mode, fixed = resolve_loss_balancing(loss_cfg, current_epoch)
@@ -248,8 +249,15 @@ class Trainer:
                 if self.grad_clip_norm:
                     self.scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                scale_before_step = self.scaler.get_scale()
                 self.scaler.step(optimizer)
                 self.scaler.update()
+                # GradScaler silently skips optimizer.step() on an inf/NaN gradient (it only
+                # shrinks the scale instead); if that happens on every batch of an epoch the
+                # epoch-level LR scheduler must not step either, or it runs ahead of the
+                # optimizer and torch raises "lr_scheduler.step() before optimizer.step()".
+                if self.scaler.get_scale() >= scale_before_step:
+                    any_optimizer_step = True
 
             total_loss += loss_out.total_loss.item()
             n_batches += 1
@@ -311,6 +319,7 @@ class Trainer:
             "gender_coverage": (
                 1.0 - gender_abstention_value if gender_abstention_value == gender_abstention_value else float("nan")
             ),
+            "optimizer_stepped": any_optimizer_step,
         }
         return metrics
 
@@ -379,7 +388,8 @@ class Trainer:
                 train_metrics = self._run_batches(self.train_loader, optimizer, global_epoch + 1)
                 val_metrics = self._run_batches(self.val_loader, None, global_epoch + 1)
                 current_lr = optimizer.param_groups[-1]["lr"]  # the "head" group's LR (== the only group without differential LR)
-                scheduler.step()
+                if train_metrics["optimizer_stepped"]:
+                    scheduler.step()
                 elapsed = time.time() - start
                 self.epoch_times.append(elapsed)
                 global_epoch += 1
