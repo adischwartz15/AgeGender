@@ -5,7 +5,7 @@ Each adapter lets a task (age or dataset gender-label) adjust the shared
 
     adapter_output = z + up(dropout(gelu(down(z))))
 
-The bottleneck dimension is configurable (default 128) and is intentionally
+The bottleneck dimension is configurable (default 256) and is intentionally
 much smaller than the 512-d backbone, so adapters add few parameters
 relative to the shared backbone (see ``count_parameters`` /
 ``scripts/generate_architecture_report.py`` for the actual comparison).

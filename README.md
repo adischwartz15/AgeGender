@@ -112,7 +112,7 @@ Age Quantile Head                          Gender Classification Head
   by this repository (supervised training or the optional SimCLR-style
   pretraining) or a compatible local file you explicitly point at.
 - **Adapters**: `src/models/adapters.py` -- `adapter_output = z + up(dropout(gelu(down(z))))`,
-  configurable bottleneck dimension (default 128), near-identity at
+  configurable bottleneck dimension (default 256), near-identity at
   initialization (zero-initialized up-projection).
 - **Heads**: `src/models/heads.py` -- age quantile head (safe
   `q50, q50 - softplus(.), q50 + softplus(.)` parameterization guaranteeing

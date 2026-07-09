@@ -187,6 +187,26 @@ class MultiTaskFaceModel(nn.Module):
             for param in module.parameters():
                 param.requires_grad = True
 
+    def backbone_parameters(self):
+        """Yield every backbone parameter exactly once, regardless of architecture mode.
+
+        Used by the trainer's differential-learning-rate optimizer setup
+        (a lower LR for the backbone than for adapters/heads) so that logic
+        doesn't need its own copy of the shared-vs-separate dispatch that
+        :meth:`set_stage_trainable` already implements.
+        """
+        backbones = (
+            [self.age_backbone, self.gender_backbone]
+            if self.architecture == "separate"
+            else [self.backbone]
+        )
+        seen_ids: set[int] = set()
+        for backbone in backbones:
+            for param in backbone.parameters():
+                if id(param) not in seen_ids:
+                    seen_ids.add(id(param))
+                    yield param
+
     def parameter_breakdown(self) -> ParameterBreakdown:
         if self.architecture == "separate":
             backbone_params = sum(p.numel() for p in self.age_backbone.parameters()) + sum(

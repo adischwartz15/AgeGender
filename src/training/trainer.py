@@ -23,21 +23,84 @@ from src.utils.seed import seed_worker
 logger = logging.getLogger(__name__)
 
 
-def _build_optimizer(model: MultiTaskFaceModel, lr: float, weight_decay: float) -> torch.optim.Optimizer:
-    trainable_params = [p for p in model.parameters() if p.requires_grad]
-    return torch.optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
+def _build_optimizer(
+    model: MultiTaskFaceModel, lr: float, weight_decay: float, differential_lr_cfg: dict | None = None,
+) -> torch.optim.Optimizer:
+    """Build the stage optimizer, optionally with a lower LR for backbone parameters.
+
+    Differential (discriminative) learning rates -- a much smaller LR for
+    the backbone than for the adapters/heads -- let the backbone keep
+    training (rather than being fully frozen, the only alternative in the
+    common no-pretrained-checkpoint path) while still protecting it from
+    large, potentially destabilizing early updates. Applies identically
+    regardless of which backbone/architecture is active (via
+    ``model.backbone_parameters()``), so it does not change the relative
+    comparison between experiments -- see ``configs/training.yaml:
+    training.differential_lr``.
+    """
+    differential_lr_cfg = differential_lr_cfg or {}
+    if not differential_lr_cfg.get("enabled", False):
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        return torch.optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
+
+    multiplier = differential_lr_cfg.get("backbone_lr_multiplier", 0.1)
+    backbone_param_ids = {id(p) for p in model.backbone_parameters()}
+    backbone_params = [p for p in model.parameters() if p.requires_grad and id(p) in backbone_param_ids]
+    other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
+
+    param_groups = []
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": lr * multiplier})
+    if other_params:
+        param_groups.append({"params": other_params, "lr": lr})
+    return torch.optim.AdamW(param_groups, weight_decay=weight_decay)
 
 
 def _build_scheduler(optimizer: torch.optim.Optimizer, total_epochs: int, warmup_epochs: int):
-    def lr_lambda(epoch: int) -> float:
-        if epoch < warmup_epochs:
-            return (epoch + 1) / max(1, warmup_epochs)
-        progress = (epoch - warmup_epochs) / max(1, total_epochs - warmup_epochs)
-        import math
+    """Linear warmup for ``warmup_epochs``, then cosine annealing to ~0 for the rest.
 
-        return 0.5 * (1 + math.cos(math.pi * min(progress, 1.0)))
+    Built from ``torch.optim.lr_scheduler``'s own composable
+    ``LinearLR`` + ``CosineAnnealingLR`` (combined via ``SequentialLR``)
+    rather than a hand-rolled ``LambdaLR`` -- the same warmup-then-cosine
+    shape, expressed with the library's own scheduler classes so it also
+    correctly scales every parameter group's own base LR (needed now that
+    ``_build_optimizer`` can produce more than one group).
+    """
+    warmup_epochs = max(0, min(warmup_epochs, max(0, total_epochs - 1)))
+    cosine_epochs = max(1, total_epochs - warmup_epochs)
 
-    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    if warmup_epochs == 0:
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_epochs)
+
+    warmup = torch.optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=1.0 / warmup_epochs, end_factor=1.0, total_iters=warmup_epochs,
+    )
+    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_epochs)
+    return torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+
+
+def resolve_loss_balancing(loss_cfg: dict, current_epoch: int) -> tuple[str, dict]:
+    """Resolve the effective loss-balancing mode/fixed-weights for one epoch.
+
+    Implements the loss-balancing warmup: for the first N *global* epochs
+    (``loss_cfg.learned_uncertainty.warmup_epochs``, not reset per training
+    stage), trains with equal fixed weights (1.0/1.0) even when the
+    configured mode is ``learned_uncertainty`` -- the log-variance
+    parameters haven't seen enough loss signal yet to be a meaningful
+    weighting this early, and letting them influence the total loss from
+    epoch 1 risks early gradient interference between the two tasks.
+    ``current_epoch`` is 1-indexed. A pure function (no ``Trainer`` state)
+    so this policy is directly unit-testable without running real training.
+    """
+    configured_mode = loss_cfg["mode"]
+    warmup_epochs = (
+        loss_cfg.get("learned_uncertainty", {}).get("warmup_epochs", 0)
+        if configured_mode == "learned_uncertainty" else 0
+    )
+    in_warmup = configured_mode == "learned_uncertainty" and current_epoch <= warmup_epochs
+    if in_warmup:
+        return "fixed", {"age_weight": 1.0, "gender_weight": 1.0}
+    return configured_mode, loss_cfg.get("fixed", {"age_weight": 1.0, "gender_weight": 1.0})
 
 
 class Trainer:
@@ -137,7 +200,9 @@ class Trainer:
     def _loss_mode(self) -> str:
         return self.config["model"]["loss_balancing"]["mode"]
 
-    def _run_batches(self, loader: DataLoader, optimizer: torch.optim.Optimizer | None) -> dict[str, float]:
+    def _run_batches(
+        self, loader: DataLoader, optimizer: torch.optim.Optimizer | None, current_epoch: int,
+    ) -> dict[str, float]:
         is_train = optimizer is not None
         self.model.train(is_train)
 
@@ -150,8 +215,7 @@ class Trainer:
         gender_confidences = []
 
         loss_cfg = self.config["model"]["loss_balancing"]
-        mode = loss_cfg["mode"]
-        fixed = loss_cfg.get("fixed", {"age_weight": 1.0, "gender_weight": 1.0})
+        mode, fixed = resolve_loss_balancing(loss_cfg, current_epoch)
         max_batches = self.max_train_batches if is_train else self.max_val_batches
 
         for batch_idx, batch in enumerate(loader):
@@ -276,21 +340,45 @@ class Trainer:
         print(start_line, flush=True)
         logger.info(start_line)
 
+        loss_cfg = self.config["model"]["loss_balancing"]
+        if loss_cfg["mode"] == "learned_uncertainty":
+            warmup_epochs = loss_cfg.get("learned_uncertainty", {}).get("warmup_epochs", 0)
+            if warmup_epochs > 0:
+                warmup_line = (
+                    f"[{self.experiment_name} | seed={seed_display}] Loss-balancing warmup: "
+                    f"training with equal fixed weights for the first {warmup_epochs} epoch(s) "
+                    "before switching to learned homoscedastic-uncertainty weighting."
+                )
+                print(warmup_line, flush=True)
+                logger.info(warmup_line)
+
+        differential_lr_cfg = self.training_cfg.get("differential_lr", {})
+        if differential_lr_cfg.get("enabled", False):
+            diff_lr_line = (
+                f"[{self.experiment_name} | seed={seed_display}] Differential learning rates enabled: "
+                f"backbone_lr_multiplier={differential_lr_cfg.get('backbone_lr_multiplier', 0.1)} "
+                "(backbone trains at a fraction of the stage LR; adapters/heads use the full stage LR)."
+            )
+            print(diff_lr_line, flush=True)
+            logger.info(diff_lr_line)
+
         global_epoch = 0
         for stage in stages:
             stage_line = f"=== {stage.name} (epochs={stage.epochs}, lr={stage.lr:.2e}) ==="
             print(stage_line, flush=True)
             logger.info(stage_line)
             self.model.set_stage_trainable(stage.freeze_backbone, stage.unfreeze_layers)
-            optimizer = _build_optimizer(self.model, stage.lr, self.training_cfg.get("weight_decay", 0.05))
+            optimizer = _build_optimizer(
+                self.model, stage.lr, self.training_cfg.get("weight_decay", 0.05), differential_lr_cfg,
+            )
             scheduler = _build_scheduler(optimizer, stage.epochs, self.training_cfg["scheduler"].get("warmup_epochs", 1))
             early_stopping = EarlyStopping(patience=self.training_cfg.get("early_stopping_patience", 8), mode="min")
 
             for _ in range(stage.epochs):
                 start = time.time()
-                train_metrics = self._run_batches(self.train_loader, optimizer)
-                val_metrics = self._run_batches(self.val_loader, None)
-                current_lr = optimizer.param_groups[0]["lr"]
+                train_metrics = self._run_batches(self.train_loader, optimizer, global_epoch + 1)
+                val_metrics = self._run_batches(self.val_loader, None, global_epoch + 1)
+                current_lr = optimizer.param_groups[-1]["lr"]  # the "head" group's LR (== the only group without differential LR)
                 scheduler.step()
                 elapsed = time.time() - start
                 self.epoch_times.append(elapsed)

@@ -15,8 +15,23 @@ training:
   grad_clip_norm: 1.0
   mixed_precision: true
   seed: 42
-  early_stopping_patience: 8
+  # Raised from 8 -> 12 so deeper/slower-converging architectures (e.g. the
+  # 18-layer ResNet backbone) have more room to keep improving before
+  # training stops; applies identically to every experiment.
+  early_stopping_patience: 12
   selection_metrics: [val_age_mae, val_gender_accuracy, val_balanced_score]
+
+  # Differential (discriminative) learning rates: the backbone trains at
+  # `stage_lr * backbone_lr_multiplier` while adapters/heads (and the
+  # learned-uncertainty log-variances) train at the full `stage_lr` --
+  # instead of ever fully freezing the backbone in the common
+  # (no-pretrained-checkpoint) path, it keeps training, just more gently,
+  # which protects it from large destabilizing early updates without
+  # stopping it from adapting at all. Applies to every architecture/stage
+  # uniformly (see src/training/trainer.py:_build_optimizer).
+  differential_lr:
+    enabled: true
+    backbone_lr_multiplier: 0.1
   # Optional hard caps on batches-per-epoch, independent of epoch count --
   # unset (null/absent) by default, meaning no limit (every real training
   # run iterates the full dataset each epoch). Only meant to be overridden
@@ -53,7 +68,10 @@ training:
 
   warm_up_from_scratch:
     # used instead of staged freezing when there is no pretrained checkpoint
-    epochs: 12
+    # Raised from 12 -> 20 to give deeper architectures more time to
+    # converge; early stopping (above) still applies, so this is a ceiling,
+    # not a forced longer run.
+    epochs: 20
     lr: 1.0e-3
 
 pretrain:

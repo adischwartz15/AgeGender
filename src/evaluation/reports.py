@@ -286,7 +286,7 @@ def generate_markdown_report(outputs_dir: str | Path) -> str:
         "- Backbone: manually implemented ResNet-18 (`src/models/custom_resnet.py`), "
         "block layout [2, 2, 2, 2], 512-d embedding.\n"
         "- Task adapters: residual bottleneck adapters "
-        "(`z + up(dropout(gelu(down(z))))`), configurable bottleneck dim (default 128).\n"
+        "(`z + up(dropout(gelu(down(z))))`), configurable bottleneck dim (default 256).\n"
         "- Heads: age quantile head (q10/q50/q90) and dataset gender-label softmax head.\n"
         "- Loss balancing: fixed weights or learned homoscedastic-uncertainty weighting.\n"
     )

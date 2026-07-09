@@ -21,7 +21,13 @@ model:
 
   adapters:
     enabled: true
-    bottleneck_dim: 128
+    # Task-adapter hidden (bottleneck) dimension. Raised from 128 -> 256 so
+    # each task-specific adapter has more capacity to transfer richer
+    # features out of the shared backbone embedding before its head --
+    # applies identically to every experiment using shared_adapters
+    # (exp_0, exp_0b, exp_0c, exp_c, exp_d), so it does not change the
+    # relative comparison between backbones.
+    bottleneck_dim: 256
     dropout: 0.1
 
   age_head:
@@ -46,6 +52,14 @@ model:
     learned_uncertainty:
       init_log_var_age: 0.0
       init_log_var_gender: 0.0
+      # Number of initial epochs (global, not per-stage) to train with
+      # equal fixed weights (1.0/1.0) before switching to the learned
+      # log-variance weights -- stabilizes the learned-uncertainty
+      # mechanism against early gradient interference, before the
+      # log-variance parameters have seen enough loss signal to be
+      # meaningful. 0 disables warmup (learned weighting from epoch 1).
+      # Only relevant when loss_balancing.mode == learned_uncertainty.
+      warmup_epochs: 3
 
 gradcam:
   target_layer: layer4            # last residual stage of the backbone
