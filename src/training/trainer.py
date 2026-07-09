@@ -18,6 +18,7 @@ from src.models.multitask_model import MultiTaskFaceModel
 from src.training.callbacks import EarlyStopping
 from src.training.checkpointing import BestMetricTracker, save_checkpoint
 from src.training.stages import Stage, build_stage_plan
+from src.utils.seed import seed_worker
 
 logger = logging.getLogger(__name__)
 
@@ -88,14 +89,36 @@ class Trainer:
 
         batch_size = self.training_cfg.get("batch_size", 64)
         num_workers = self.training_cfg.get("num_workers", 2)
+        # pin_memory speeds up host->device transfer, but only actually helps
+        # (and is only supported) when transferring to a CUDA device.
+        # worker_init_fn=seed_worker gives each DataLoader worker process its
+        # own deterministic-but-distinct RNG state, so augmentation
+        # randomness is reproducible across runs even with num_workers > 0
+        # (without it, workers can otherwise end up sharing correlated RNG
+        # state inherited from the parent process).
+        pin_memory = device == "cuda"
         self.train_loader = DataLoader(
-            train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, drop_last=len(train_dataset) > batch_size
+            train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
+            drop_last=len(train_dataset) > batch_size, pin_memory=pin_memory,
+            worker_init_fn=seed_worker if num_workers > 0 else None,
         )
-        self.val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers)
+        self.val_loader = DataLoader(
+            val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+            pin_memory=pin_memory, worker_init_fn=seed_worker if num_workers > 0 else None,
+        )
 
         self.mixed_precision = self.training_cfg.get("mixed_precision", True) and device == "cuda"
         self.scaler = torch.amp.GradScaler("cuda", enabled=self.mixed_precision)
         self.grad_clip_norm = self.training_cfg.get("grad_clip_norm", 1.0)
+
+        # Optional hard caps on batches-per-epoch (config-driven, default
+        # None = unlimited). Distinct from epoch count: a "smoke test" that
+        # caps epochs to 1 still iterates the *entire* dataset once, which
+        # can be slow on a large dataset -- these let a fast integration
+        # check also cap batches-per-epoch, without affecting any real
+        # training run that doesn't set them.
+        self.max_train_batches = self.training_cfg.get("max_train_batches_per_epoch")
+        self.max_val_batches = self.training_cfg.get("max_val_batches_per_epoch")
 
         self.history: dict[str, list[float]] = {
             "train_loss": [], "val_loss": [], "val_age_mae": [], "val_age_rmse": [], "val_gender_accuracy": [],
@@ -129,8 +152,11 @@ class Trainer:
         loss_cfg = self.config["model"]["loss_balancing"]
         mode = loss_cfg["mode"]
         fixed = loss_cfg.get("fixed", {"age_weight": 1.0, "gender_weight": 1.0})
+        max_batches = self.max_train_batches if is_train else self.max_val_batches
 
-        for batch in loader:
+        for batch_idx, batch in enumerate(loader):
+            if max_batches is not None and batch_idx >= max_batches:
+                break
             images = batch["image"].to(self.device)
             age_target = batch["age"].to(self.device)
             age_mask = batch["age_mask"].to(self.device)

@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.dataset import FaceMultiTaskDataset
 from src.data.transforms import EvalTransform
-from src.evaluation.calibration import apply_conformal_offset, load_calibration
+from src.evaluation.calibration import apply_conformal_offset, load_calibration, validate_calibration_artifact
 from src.evaluation.comparison import build_parametric_vs_knn_table
 from src.evaluation.knn_baseline import KNNEmbeddingBaseline
 from src.evaluation.metrics import (
@@ -35,8 +35,8 @@ from src.evaluation.metrics import (
     mean_interval_width, median_interval_width, select_interval_examples,
 )
 from src.inference.artifacts import load_model_checkpoint
-from src.utils.config import REPO_ROOT
-from src.utils.io import save_json
+from src.utils.config import REPO_ROOT, resolve_device
+from src.utils.io import checkpoint_experiment_name, save_json
 from src.utils.logging import get_logger
 from src.utils.visualization import (
     plot_age_scatter, plot_confusion_matrix, plot_coverage_width_tradeoff, plot_error_histogram,
@@ -69,11 +69,20 @@ def run_inference(model, dataset, device, batch_size=64):
         n_images += len(images)
     elapsed = time.time() - start
     latency_ms_per_image = (elapsed / max(1, n_images)) * 1000.0
+
+    # DataLoader(shuffle=False) iterates the dataset in index order 0..N-1,
+    # so dataset.df's own row order (whatever "sample id" a caller wants --
+    # here the image path, since there is no separate id column) lines up
+    # exactly with every array above. Callers (paired bootstrap comparisons,
+    # calibration provenance) rely on this to verify samples are actually
+    # aligned across models/runs, not just equal in count.
+    sample_id = dataset.df["image_path"].to_numpy() if hasattr(dataset, "df") else None
+
     return {
         "q10": np.concatenate(q10s), "q50": np.concatenate(q50s), "q90": np.concatenate(q90s),
         "probs": np.concatenate(probs_all), "age": np.concatenate(ages), "age_mask": np.concatenate(age_masks),
         "gender": np.concatenate(genders), "gender_mask": np.concatenate(gender_masks),
-        "latency_ms_per_image": latency_ms_per_image,
+        "latency_ms_per_image": latency_ms_per_image, "sample_id": sample_id,
     }
 
 
@@ -133,7 +142,7 @@ def evaluate_checkpoint(
     ``scripts/generate_architecture_report.py``'s ablation table). Returns
     None (after logging an error) if no prepared split exists yet.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device("auto")
     model, config, _ = load_model_checkpoint(checkpoint_path, device)
 
     splits_path = REPO_ROOT / config["paths"]["splits_dir"] / "full_metadata_with_splits.csv"
@@ -145,7 +154,22 @@ def evaluate_checkpoint(
     dataset = FaceMultiTaskDataset(test_df, EvalTransform(config["dataset"]["image_size"]))
 
     preds = run_inference(model, dataset, device)
-    calibration = load_calibration(calibration_dir or REPO_ROOT / "outputs" / "calibration")
+
+    # No silent fallback to a shared global outputs/calibration directory:
+    # a caller that doesn't know/pass an isolated calibration_dir gets no
+    # calibration applied (raw metrics only) rather than possibly picking
+    # up some other experiment/seed's leftover conformal offset.
+    calibration = load_calibration(calibration_dir) if calibration_dir else None
+    if calibration is not None:
+        validate_calibration_artifact(
+            calibration,
+            checkpoint_path=checkpoint_path,
+            split_csv_path=splits_path,
+            test_sample_ids=test_df["image_path"].tolist(),
+        )
+    elif calibration_dir is None:
+        logger.info("No calibration_dir given; evaluating with raw (uncalibrated) intervals only.")
+
     confidence_threshold = config["model"]["gender_head"].get("confidence_threshold", 0.80)
     metrics = compute_parametric_metrics(preds, confidence_threshold, calibration)
 
@@ -222,9 +246,6 @@ def evaluate_checkpoint(
     return metrics
 
 
-_CHECKPOINT_SUFFIXES = ("_best_balanced_score", "_best_age_mae", "_best_gender_accuracy")
-
-
 def _default_output_name(checkpoint_path: str) -> str:
     """Derive '{experiment}_test_metrics' from a checkpoint filename.
 
@@ -234,11 +255,7 @@ def _default_output_name(checkpoint_path: str) -> str:
     not just ones evaluated via scripts/run_experiments.py, without the
     caller having to remember to pass --output-name.
     """
-    stem = Path(checkpoint_path).stem
-    for suffix in _CHECKPOINT_SUFFIXES:
-        if stem.endswith(suffix):
-            return stem[: -len(suffix)] + "_test_metrics"
-    return stem + "_test_metrics"
+    return checkpoint_experiment_name(checkpoint_path) + "_test_metrics"
 
 
 def main() -> int:

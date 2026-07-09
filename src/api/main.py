@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+from contextlib import asynccontextmanager
 
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -32,12 +33,28 @@ from src.api.schemas import (
     ReloadModelsResponse,
 )
 from src.inference.quality import compute_quality_diagnostics
-from src.utils.config import load_env_file
+from src.utils.config import CONFIG_DIR, load_config, load_env_file
 from src.utils.logging import get_logger
 
 load_env_file()  # populate os.environ from .env (e.g. GENDER_LABEL_0/1) before anything reads it
 
 logger = get_logger("api")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Modern replacement for the deprecated ``@app.on_event("startup")`` hook.
+
+    Everything after ``yield`` would run on shutdown; there is nothing to
+    clean up here (no open connections/background tasks), so the
+    generator just yields once.
+    """
+    try:
+        app_state.load()
+    except Exception:  # pragma: no cover - defensive: API should still boot
+        logger.exception("Failed to load model artifacts at startup; /health will report not-ready")
+    yield
+
 
 app = FastAPI(
     title="face-multitask-research API",
@@ -46,19 +63,23 @@ app = FastAPI(
         "dataset gender-label prediction. " + DISCLAIMER
     ),
     version="0.1.0",
+    lifespan=_lifespan,
 )
 
 
-@app.on_event("startup")
-def _startup() -> None:
-    try:
-        app_state.load()
-    except Exception:  # pragma: no cover - defensive: API should still boot
-        logger.exception("Failed to load model artifacts at startup; /health will report not-ready")
-
-
 def _configure_cors() -> None:
-    origins = app_state.config.get("api", {}).get("cors_origins", ["*"])
+    """Add CORS middleware using ``configs/api.yaml`` directly (not ``app_state.config``).
+
+    Middleware must be registered before the app starts handling requests
+    (Starlette raises if ``add_middleware`` is called afterward), which is
+    before ``_lifespan``'s startup code runs -- so this reads
+    ``configs/api.yaml`` itself rather than depending on ``app_state.load()``,
+    which hadn't populated ``app_state.config`` yet at the point this used
+    to be called, silently always falling back to the wildcard default
+    regardless of the configured ``cors_origins``.
+    """
+    api_config = load_config(CONFIG_DIR / "api.yaml").get("api", {})
+    origins = api_config.get("cors_origins", ["*"])
     app.add_middleware(
         CORSMiddleware,
         allow_origins=origins or ["*"],

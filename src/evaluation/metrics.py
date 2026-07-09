@@ -87,8 +87,6 @@ def gender_effective_accuracy(y_true: np.ndarray, y_pred: np.ndarray, abstain_ma
     return float(np.sum(accepted_correct) / len(y_true))
 
 
-
-
 def age_uncertainty_by_bucket(
     y_true: np.ndarray, q10: np.ndarray, q50: np.ndarray, q90: np.ndarray,
     bucket_edges: list[int] | None = None,

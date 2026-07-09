@@ -16,6 +16,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -26,7 +27,7 @@ from src.evaluation.gradcam import GradCAM, resize_heatmap
 from src.evaluation.robustness import apply_corruption
 from src.inference.artifacts import load_model_checkpoint
 from src.inference.quality import compute_quality_diagnostics
-from src.utils.config import REPO_ROOT
+from src.utils.config import REPO_ROOT, resolve_device
 from src.utils.logging import get_logger
 from src.utils.visualization import save_gradcam_overlay
 
@@ -39,7 +40,7 @@ def main() -> int:
     parser.add_argument("--num-samples", type=int, default=12)
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device("auto")
     model, config, _ = load_model_checkpoint(args.checkpoint, device)
 
     splits_path = REPO_ROOT / config["paths"]["splits_dir"] / "full_metadata_with_splits.csv"
@@ -92,7 +93,7 @@ def main() -> int:
             age_result = gradcam.generate(image_tensor.clone(), task="age")
             gender_result = gradcam.generate(image_tensor.clone(), task="gender")
 
-            image_np = __import__("numpy").asarray(rgb.resize((config["dataset"]["image_size"],) * 2))
+            image_np = np.asarray(rgb.resize((config["dataset"]["image_size"],) * 2))
             age_heatmap = resize_heatmap(age_result["heatmap"], image_np.shape[:2][::-1])
             gender_heatmap = resize_heatmap(gender_result["heatmap"], image_np.shape[:2][::-1])
 
@@ -118,7 +119,7 @@ def main() -> int:
                 blurred_result = gradcam.generate(blurred_tensor, task="age")
                 blurred_heatmap = resize_heatmap(blurred_result["heatmap"], image_np.shape[:2][::-1])
                 save_gradcam_overlay(
-                    __import__("numpy").asarray(blurred.resize((config["dataset"]["image_size"],) * 2)) / 255.0,
+                    np.asarray(blurred.resize((config["dataset"]["image_size"],) * 2)) / 255.0,
                     blurred_heatmap, output_dir / f"blurry_{i}_age_attention.png",
                     "Model attention visualization: age (blurred input)",
                 )

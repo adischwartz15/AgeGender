@@ -49,7 +49,7 @@ from src.evaluation.backbone_comparison import (  # noqa: E402
 from src.evaluation.calibration import load_calibration  # noqa: E402
 from src.evaluation.robustness import build_robustness_diff_table, compute_degradation  # noqa: E402
 from src.inference.artifacts import load_model_checkpoint  # noqa: E402
-from src.utils.config import REPO_ROOT  # noqa: E402
+from src.utils.config import REPO_ROOT, resolve_device  # noqa: E402
 from src.utils.io import save_json  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 from src.utils.visualization import (  # noqa: E402
@@ -72,7 +72,7 @@ def _parse_name_value_pairs(pairs: list[str] | None) -> dict[str, str]:
 
 
 def load_model_and_predictions(checkpoint_path: str, calibration_dir: str | None, batch_size: int = 64):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device("auto")
     model, config, _ = load_model_checkpoint(checkpoint_path, device)
 
     splits_path = REPO_ROOT / config["paths"]["splits_dir"] / "full_metadata_with_splits.csv"
@@ -158,6 +158,10 @@ def main() -> int:
         {name: {str(level): ci for level, ci in cis.items()} for name, cis in gender_analysis["pairwise_bootstrap"].items()},
         output_dir / "gender_pairwise_bootstrap.json",
     )
+    # Bootstrap CI on the AURC summary statistic itself -- distinct from the
+    # fixed-coverage-level CI above, and the only one build_final_interpretation
+    # is allowed to cite as evidence of a "statistically supported AURC" claim.
+    save_json(gender_analysis["pairwise_bootstrap_aurc"], output_dir / "gender_aurc_bootstrap.json")
     plot_risk_coverage_curves(gender_analysis["curves"], "Selective risk (1 - accuracy)", "Gender risk-coverage", plots_dir / "gender_risk_coverage.png")
 
     # 3. Age selective-prediction analysis.
@@ -168,6 +172,7 @@ def main() -> int:
         {name: {str(level): ci for level, ci in cis.items()} for name, cis in age_analysis["pairwise_bootstrap"].items()},
         output_dir / "age_pairwise_bootstrap.json",
     )
+    save_json(age_analysis["pairwise_bootstrap_aurc"], output_dir / "age_aurc_bootstrap.json")
     plot_risk_coverage_curves(age_analysis["mae_curves"], "Selective age MAE (years)", "Age selective-prediction risk-coverage", plots_dir / "age_risk_coverage_mae.png")
     plot_risk_coverage_curves(age_analysis["rmse_curves"], "Selective age RMSE (years)", "Age selective-prediction risk-coverage (RMSE)", plots_dir / "age_risk_coverage_rmse.png")
 

@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from src.models.custom_resnet import CustomResNet18, build_backbone
+from src.utils.seed import seed_worker
 
 logger = logging.getLogger(__name__)
 
@@ -75,12 +76,15 @@ def pretrain_simclr(
         lr=pretrain_cfg.get("lr", 3.0e-4),
         weight_decay=pretrain_cfg.get("weight_decay", 1e-6),
     )
+    num_workers = pretrain_cfg.get("num_workers", 2)
     loader = DataLoader(
         train_dataset,
         batch_size=pretrain_cfg.get("batch_size", 128),
         shuffle=True,
-        num_workers=pretrain_cfg.get("num_workers", 2),
+        num_workers=num_workers,
         drop_last=True,
+        pin_memory=(device == "cuda"),
+        worker_init_fn=seed_worker if num_workers > 0 else None,
     )
 
     history = {"loss": [], "epoch_time_seconds": []}

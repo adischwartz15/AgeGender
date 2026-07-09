@@ -21,7 +21,7 @@ from src.data.dataset import FaceMultiTaskDataset
 from src.data.transforms import EvalTransform
 from src.evaluation.knn_baseline import KNNEmbeddingBaseline
 from src.inference.artifacts import load_model_checkpoint
-from src.utils.config import REPO_ROOT
+from src.utils.config import REPO_ROOT, resolve_device
 from src.utils.logging import get_logger
 
 logger = get_logger("scripts.build_knn_index")
@@ -55,7 +55,7 @@ def main() -> int:
     parser.add_argument("--k", type=int, default=None)
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device("auto")
     model, config, _ = load_model_checkpoint(args.checkpoint, device)
 
     splits_path = REPO_ROOT / config["paths"]["splits_dir"] / "full_metadata_with_splits.csv"

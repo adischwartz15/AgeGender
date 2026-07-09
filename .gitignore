@@ -52,3 +52,8 @@ docs/final_results_report.md
 
 # Logs
 *.log
+
+# Local-only holding area for files/checkpoints removed from the tracked
+# codebase during cleanup passes but kept on disk as a safety net -- never
+# committed (see docs/codebase_audit.md, Section 3).
+_cleanup_backup/

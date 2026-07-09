@@ -17,6 +17,15 @@ training:
   seed: 42
   early_stopping_patience: 8
   selection_metrics: [val_age_mae, val_gender_accuracy, val_balanced_score]
+  # Optional hard caps on batches-per-epoch, independent of epoch count --
+  # unset (null/absent) by default, meaning no limit (every real training
+  # run iterates the full dataset each epoch). Only meant to be overridden
+  # for a fast "smoke test" integration check (e.g. --set
+  # training.max_train_batches_per_epoch=3), so a 1-epoch smoke run doesn't
+  # still have to iterate an entire large dataset once to validate the
+  # pipeline end-to-end.
+  # max_train_batches_per_epoch: null
+  # max_val_batches_per_epoch: null
 
   scheduler:
     name: cosine

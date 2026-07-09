@@ -33,7 +33,7 @@ from src.evaluation.architecture_analysis import (
 from src.evaluation.comparison import build_architecture_ablation_table
 from src.evaluation.reports import discover_experiment_results, save_report
 from src.inference.artifacts import load_model_checkpoint
-from src.utils.config import REPO_ROOT
+from src.utils.config import REPO_ROOT, resolve_device
 from src.utils.io import save_json
 from src.utils.logging import get_logger
 from src.utils.visualization import plot_embedding_scatter, plot_gradient_cosine_similarity
@@ -47,7 +47,7 @@ def main() -> int:
     parser.add_argument("--reduction", default="pca", choices=["pca", "tsne"])
     args = parser.parse_args()
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = resolve_device("auto")
     model, config, _ = load_model_checkpoint(args.checkpoint, device)
 
     splits_path = REPO_ROOT / config["paths"]["splits_dir"] / "full_metadata_with_splits.csv"

@@ -35,6 +35,17 @@ def _extract_training_helpers_source(notebook_path: Path) -> str:
     raise AssertionError(f"No cell defining run_experiment_pipeline found in {notebook_path}")
 
 
+def _extract_helper_library_source(notebook_path: Path) -> str:
+    nb = json.loads(notebook_path.read_text(encoding="utf-8"))
+    for cell in nb["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        source = "".join(cell["source"])
+        if "def run_command" in source:
+            return source
+    raise AssertionError(f"No cell defining run_command found in {notebook_path}")
+
+
 @pytest.fixture(params=["train_evaluate_colab.ipynb", "train_evaluate_kaggle.ipynb"])
 def training_helpers_namespace(request, tmp_path):
     """Exec the real notebook cell in a namespace with mocked I/O, returning
@@ -91,6 +102,7 @@ def training_helpers_namespace(request, tmp_path):
         "FORCE_RERUN": False,
         "MAX_EPOCHS": 1,
         "EARLY_STOPPING_PATIENCE": 1,
+        "MAX_BATCHES_PER_EPOCH": None,
         "experiments_cfg": {"fake_exp": {"overrides": {}}},
         "run_command": fake_run_command,
         "write_manifest": fake_write_manifest,
@@ -149,3 +161,83 @@ def test_resume_skips_every_stage_when_all_artifacts_already_exist(training_help
 
     assert calls == [], "no stage should re-run when every artifact already exists"
     assert metrics == {"age_mae": 3.3}
+
+
+@pytest.fixture(params=["train_evaluate_colab.ipynb", "train_evaluate_kaggle.ipynb"])
+def helper_library_namespace(request, monkeypatch):
+    """Exec the real notebook "Helper library" cell (defines run_command,
+    copy_tree_merge, safe_copy2, ...) in a bare namespace.
+
+    The cell imports ``IPython.display`` (only available inside an actual
+    Jupyter/Colab/Kaggle runtime, not a project dependency here), so a
+    minimal stand-in module is injected into ``sys.modules`` purely to
+    satisfy that import -- nothing under test touches it.
+    """
+    import sys
+    import types
+
+    fake_display = types.ModuleType("IPython.display")
+    fake_display.Image = object
+    fake_display.Markdown = object
+    fake_display.display = lambda *a, **k: None
+    fake_ipython = types.ModuleType("IPython")
+    fake_ipython.display = fake_display
+    monkeypatch.setitem(sys.modules, "IPython", fake_ipython)
+    monkeypatch.setitem(sys.modules, "IPython.display", fake_display)
+
+    source = _extract_helper_library_source(NOTEBOOKS_DIR / request.param)
+    namespace = {"__name__": "helper_library_under_test"}
+    exec(compile(source, str(NOTEBOOKS_DIR / request.param), "exec"), namespace)
+    return namespace
+
+
+def test_safe_copy2_skips_instead_of_raising_when_source_and_destination_are_identical(
+    helper_library_namespace, tmp_path,
+):
+    """Regression test for a Colab resume crash:
+
+        SameFileError: RUN_DIR/logs/npm_build.log and RUN_DIR/logs/npm_build.log
+        are the same file.
+
+    This happens whenever RUN_DIR already points at the persistent Drive run
+    directory (e.g. a resumed run) and a later "sync to persistent storage"
+    step tries to copy a file onto itself. safe_copy2 must detect that via
+    resolved-path equality and skip instead of raising.
+    """
+    safe_copy2 = helper_library_namespace["safe_copy2"]
+    same_file = tmp_path / "logs" / "npm_build.log"
+    same_file.parent.mkdir(parents=True, exist_ok=True)
+    same_file.write_text("build output", encoding="utf-8")
+
+    result = safe_copy2(same_file, same_file)
+
+    assert Path(result).resolve() == same_file.resolve()
+    assert same_file.read_text(encoding="utf-8") == "build output"
+
+
+def test_safe_copy2_still_copies_when_source_and_destination_differ(helper_library_namespace, tmp_path):
+    safe_copy2 = helper_library_namespace["safe_copy2"]
+    src = tmp_path / "src.log"
+    src.write_text("hello", encoding="utf-8")
+    dst = tmp_path / "dst.log"
+
+    safe_copy2(src, dst)
+
+    assert dst.read_text(encoding="utf-8") == "hello"
+
+
+def test_copy_tree_merge_does_not_raise_when_src_and_dst_are_the_same_directory(
+    helper_library_namespace, tmp_path,
+):
+    """End-to-end version of the reported crash: mirroring RUN_DIR onto
+    itself (a resumed run whose RUN_DIR already *is* the persistent Drive
+    directory) must not raise SameFileError for any file underneath it."""
+    copy_tree_merge = helper_library_namespace["copy_tree_merge"]
+    run_dir = tmp_path / "run"
+    (run_dir / "logs").mkdir(parents=True)
+    (run_dir / "logs" / "npm_build.log").write_text("build output", encoding="utf-8")
+
+    copied = copy_tree_merge(run_dir, run_dir)
+
+    assert (run_dir / "logs" / "npm_build.log").read_text(encoding="utf-8") == "build output"
+    assert len(copied) == 1

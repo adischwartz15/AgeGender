@@ -205,12 +205,23 @@ def resolve_path(relative_or_absolute: str | os.PathLike) -> Path:
 
 
 def resolve_device(device_setting: str) -> str:
-    """Resolve the "auto" device setting to "cuda" or "cpu"."""
+    """Resolve the "auto" device setting to "cuda", "mps", or "cpu".
+
+    Checks CUDA first (NVIDIA GPUs), then Apple Silicon's Metal backend
+    (``torch.backends.mps``), falling back to CPU when neither is
+    available or torch itself isn't importable. An explicit
+    ``device_setting`` (not "auto") is always returned unchanged -- this
+    only resolves the "pick the best available device" case.
+    """
     if device_setting != "auto":
         return device_setting
     try:
         import torch
 
-        return "cuda" if torch.cuda.is_available() else "cpu"
+        if torch.cuda.is_available():
+            return "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
     except ImportError:
         return "cpu"

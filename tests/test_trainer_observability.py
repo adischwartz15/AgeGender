@@ -99,6 +99,43 @@ def test_maybe_checkpoint_returns_true_only_on_improvement(tmp_path, synthetic_m
     assert trainer._maybe_checkpoint("age_mae", float("nan"), epoch=4, metrics={}) is False  # NaN never checkpoints
 
 
+def test_max_batches_per_epoch_caps_training_and_validation_batches(tmp_path, synthetic_metadata_df, tiny_config):
+    """Regression test for the smoke-mode speed cap: with
+    max_train_batches_per_epoch / max_val_batches_per_epoch set, a run must
+    still complete correctly (checkpoints/history written) even though it
+    only ever sees a handful of batches per epoch -- this is what lets a
+    "smoke test" validate the pipeline quickly on a large dataset instead of
+    still iterating it fully once per epoch just because epochs=1."""
+    tiny_config["training"]["warm_up_from_scratch"]["epochs"] = 1
+    tiny_config["training"]["max_train_batches_per_epoch"] = 1
+    tiny_config["training"]["max_val_batches_per_epoch"] = 1
+    tiny_config["training"]["batch_size"] = 2  # small enough that "1 batch" << full dataset
+    train_dataset, val_dataset = _build_datasets(synthetic_metadata_df, tiny_config, seed=4)
+
+    model = build_multitask_model(tiny_config)
+    output_dir = tmp_path / "output"
+    trainer = Trainer(
+        model, tiny_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="capped_test", output_dir=output_dir,
+    )
+    assert trainer.max_train_batches == 1
+    assert trainer.max_val_batches == 1
+    trainer.train()  # must not raise despite the tiny per-epoch batch cap
+
+    assert (output_dir / "metrics" / "capped_test_history.csv").exists()
+
+
+def test_max_batches_per_epoch_defaults_to_unlimited(tmp_path, synthetic_metadata_df, tiny_config):
+    train_dataset, val_dataset = _build_datasets(synthetic_metadata_df, tiny_config, seed=5)
+    model = build_multitask_model(tiny_config)
+    trainer = Trainer(
+        model, tiny_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="uncapped_test", output_dir=tmp_path / "output",
+    )
+    assert trainer.max_train_batches is None
+    assert trainer.max_val_batches is None
+
+
 def test_backward_compatible_without_explicit_output_dir(tmp_path, synthetic_metadata_df, tiny_config):
     """Trainer must still work when output_dir is omitted (existing callers /
     older test code), defaulting sensibly to checkpoint_dir.parent."""
