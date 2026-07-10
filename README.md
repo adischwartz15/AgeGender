@@ -1,9 +1,9 @@
-# face-multitask-research
+# Face Multi-Task Research
 
-Multi-task face age and dataset gender-label prediction with shared
-representations, task-specific adapters, learned loss balancing,
-uncertainty estimation, non-parametric comparison, and Grad-CAM
-explainability -- built from scratch on a manually implemented ResNet-18.
+An uncertainty-aware multi-task vision system for age quantile estimation
+and dataset gender-label classification, built around a manually
+implemented ResNet-18, shared representations, task-specific adapters,
+conformal calibration, and selective prediction.
 
 > **Research and demonstration only.** Predictions may be inaccurate,
 > biased, or unreliable. Gender-related output reflects labels in the
@@ -12,877 +12,219 @@ explainability -- built from scratch on a manually implemented ResNet-18.
 > identity verification, medical diagnosis, admissions, insurance, or any
 > other high-impact decision. See [Ethical limitations](#ethical-limitations).
 
-## Table of contents
+## Highlights
 
-- [Research objective](#research-objective)
-- [Ethical limitations](#ethical-limitations)
-- [Architecture](#architecture)
-- [Results](#results)
-- [Repository layout](#repository-layout)
-- [Setup](#setup)
-- [Kaggle API setup](#kaggle-api-setup)
-- [Dataset format](#dataset-format)
-- [Data validation workflow](#data-validation-workflow)
-- [Training](#training)
-- [Self-supervised pretraining (optional)](#self-supervised-pretraining-optional)
-- [Architecture ablation experiments](#architecture-ablation-experiments)
-- [Conformal calibration](#conformal-calibration)
-- [k-NN non-parametric baseline](#k-nn-non-parametric-baseline)
-- [Robustness evaluation](#robustness-evaluation)
-- [Grad-CAM explainability](#grad-cam-explainability)
-- [Backend (FastAPI)](#backend-fastapi)
-- [Frontend (React)](#frontend-react)
-- [Demo mode](#demo-mode)
-- [Colab and Kaggle notebooks](#colab-and-kaggle-notebooks)
-- [Example API requests](#example-api-requests)
-- [Evaluation metric definitions](#evaluation-metric-definitions)
-- [Gradient interference and representation similarity](#gradient-interference-and-representation-similarity)
-- [Troubleshooting](#troubleshooting)
-- [Compute requirements](#compute-requirements)
-- [Results depend on your data](#results-depend-on-your-data)
+- **Manually implemented ResNet-18** backbone -- no `torchvision.models`,
+  `timm`, or pretrained checkpoints anywhere in the repository.
+- **Shared backbone + task-specific residual bottleneck adapters** for
+  age and dataset gender-label prediction, with an optional learned
+  homoscedastic-uncertainty loss balancer instead of fixed weights.
+- **Quantile-based age estimation** (q10/q50/q90) with **split-conformal
+  calibration** for a marginal coverage guarantee, not just a point
+  estimate.
+- **Confidence-based abstention** ("Not sure") for the gender-label head,
+  with selective/effective accuracy always reported together.
+- **Parametric vs. k-NN comparison** in the model's own learned embedding
+  space, deterministic **robustness testing** under 11 corruption types,
+  and manually implemented **Grad-CAM** ("model attention visualization").
+- **Controlled architecture ablations** (shared vs. separate backbones,
+  adapters vs. none, fixed vs. learned loss balancing, and a true
+  residual-connections ablation) with gradient-interference and
+  representation-similarity (CKA) analysis.
+- Reproducible, leakage-checked data splitting and fully isolated
+  per-experiment/seed artifacts -- see [Reproducibility and scope](#reproducibility-and-scope).
 
-## Research objective
+## Research question
 
-Given a face image, predict:
+Does a **shared** visual backbone learn useful common features for both
+age and dataset gender-label prediction, and do **task-specific
+adapters** plus **learned loss balancing** reduce negative transfer
+relative to independent backbones and fixed loss weights? Separately: is
+the added complexity of a residual (skip-connection) architecture
+actually justified, once measured against a depth/width-matched
+non-residual baseline rather than an unrelated compact CNN?
 
-- **Estimated age**, as a central estimate (q50) plus a q10-q90 prediction interval.
-- **Age uncertainty**, both raw (pinball/quantile) and conformal-calibrated.
-- **Dataset gender-label prediction**: softmax probabilities over dataset-defined labels, or **"Not sure"** below a configurable confidence threshold.
-- **Separate Grad-CAM heatmaps** ("model attention visualization") for the age and gender-label decisions.
-- **A parametric-vs-non-parametric comparison**: the trained model's heads vs. a k-NN classifier/regressor in its own embedding space.
+These questions are answered by a config-driven ablation suite (Experiments
+0/0b/0c, A-F) against one fixed, reused data split, following a protocol
+pre-registered before results are observed -- see
+[docs/experiment_plan.md](docs/experiment_plan.md) and
+[docs/final_evaluation_protocol.md](docs/final_evaluation_protocol.md).
+Results below are not a claim that every question was answered
+conclusively; see [docs/results.md](docs/results.md) for what one real
+run actually found.
 
-The central research question: does a **shared** visual backbone learn
-useful common features for both tasks, and do **task-specific adapters**
-plus **learned loss balancing** reduce negative transfer relative to
-independent backbones and fixed loss weights? See
-`docs/experiment_plan.md` and `docs/architecture_analysis.md`. The final,
-reported run follows a protocol pre-registered before results are
-observed (models, seeds, metrics, robustness conditions, thresholds, and
-the decision rule for crediting residual complexity) -- see
-`docs/final_evaluation_protocol.md`.
+## Architecture
+
+```
+Input face image
+    |
+    v
+Custom ResNet-18 backbone (manually implemented)
+    |
+    v
+Shared 512-dimensional embedding
+    |
+    +-- Age Adapter -------- Age Quantile Head -------- q10, q50, q90
+    |
+    +-- Gender Adapter ----- Classification Head ------- probabilities / "Not sure"
+```
+
+A single hand-written ResNet-18 backbone feeds two residual bottleneck
+adapters, one per task, which in turn feed the age quantile head and the
+gender classification head. Two controlled baseline backbones
+(`simple_cnn`, `plain_deep18_no_skip`) also exist purely to isolate what
+the residual design contributes -- neither is used by the deployed model.
+See [docs/architecture_analysis.md](docs/architecture_analysis.md) for
+the full module-by-module design and analysis methodology.
+
+## Headline results
+
+From one real training run on UTKFace (checkpoint
+`exp_d_shared_adapters_learned_balance`, one seed, one dataset split --
+see [docs/results.md](docs/results.md) for the full numbers, robustness
+table, and gradient-interference/CKA analysis).
+
+| Metric | Parametric | k-NN (k=15) |
+|---|---|---|
+| Age MAE | 5.71 | 5.79 |
+| q10-q90 interval coverage (raw, uncalibrated) | 0.79 | 0.91 |
+| Gender-label selective accuracy | 0.970 | 0.966 |
+| Abstention rate (confidence threshold 0.80) | 0.192 | 0.179 |
+| Latency per image (ms) | 1.8 | 2.0 |
+
+| Experiment | Backbone params | Adapter params | Total params |
+|---|---|---|---|
+| A -- separate backbones | 22,353,024 | 0 | 22,484,997 |
+| D -- shared + adapters + learned balancing | 11,176,512 | 263,424 | 11,571,911 |
+
+"Gender-label selective accuracy" is computed only over non-abstained
+predictions (see [docs/evaluation.md](docs/evaluation.md) for the
+distinction from coverage and effective accuracy). The q10-q90 interval
+is a nominal 80% interval before conformal calibration; the row above is
+raw, not calibrated. These numbers describe one checkpoint on one
+dataset split -- see [Reproducibility and scope](#reproducibility-and-scope).
+
+## Quick start
+
+```bash
+git clone <this-repo>
+cd face-multitask-research
+make install
+cp .env.example .env              # fill in Kaggle credentials (see docs/data_card.md)
+make download-data
+make prepare-data
+make train
+make calibrate CHECKPOINT=checkpoints/multitask_best_balanced_score.pt
+make demo
+```
+
+Requirements: Python 3.11+ (3.10+ also works), Node.js 20+/npm for the
+frontend. `make demo` checks readiness (a trained checkpoint + calibration
+artifact) and launches both the API and the frontend together.
+
+## Main workflow
+
+```bash
+make prepare-data                          # validate + split raw metadata
+make train                                  # single default configuration
+make experiments                            # full ablation suite (0/0b/0c, A-F)
+make calibrate CHECKPOINT=<checkpoint>.pt   # split-conformal age intervals
+make build-knn CHECKPOINT=<checkpoint>.pt   # k-NN baseline index
+make evaluate CHECKPOINT=<checkpoint>.pt    # test-set metrics + k-NN comparison
+make robustness CHECKPOINT=<checkpoint>.pt  # corruption robustness sweep
+make gradcam CHECKPOINT=<checkpoint>.pt     # Grad-CAM heatmaps
+make demo                                   # launch API + frontend together
+```
+
+Every command accepts `--set key.path=value` overrides (e.g.
+`make train ARGS="--set model.architecture=shared_no_adapters"`) instead
+of editing YAML in place. See [Documentation](#documentation) below for
+the guide covering each stage.
+
+## Demo and API
+
+```bash
+make api        # FastAPI backend on :8000
+make frontend   # Vite dev server on :5173
+make demo       # both together, after a readiness check
+```
+
+`POST /predict` returns age (q10/q50/q90, raw and calibrated), gender-label
+probabilities or "Not sure", and optional Grad-CAM/k-NN comparison.
+Uploaded images are processed in memory and not persisted by default; if
+no face is detected, the API declines to predict rather than guessing.
+See [docs/api.md](docs/api.md) for the full endpoint table and example
+requests/responses.
+
+## Repository structure
+
+```
+configs/     YAML configuration (data, model, training, experiments, robustness, api)
+src/         Library code (data, models, losses, training, evaluation, inference, api, utils)
+scripts/     CLI entry points, one per pipeline stage
+tests/       Pytest suite, including a synthetic-data smoke training test
+frontend/    React + TypeScript + Vite + Tailwind dashboard
+notebooks/   Self-contained Colab and Kaggle notebooks running the full pipeline
+docs/        Architecture, experiments, data/model cards, API, reproducibility
+```
+
+`data/`, `checkpoints/`, `experiments/`, and `outputs/` hold generated
+artifacts and are never committed -- see
+[docs/reproducibility.md](docs/reproducibility.md) for the full layout.
+
+## Documentation
+
+- [Architecture and model design](docs/architecture_analysis.md)
+- [Experiment plan (Experiments 0/0b/0c, A-F)](docs/experiment_plan.md)
+- [Final evaluation protocol (pre-registered)](docs/final_evaluation_protocol.md)
+- [Headline results (full numbers)](docs/results.md)
+- [Backbone comparison suite](docs/backbone_comparison.md)
+- [Conformal calibration](docs/calibration.md)
+- [Robustness evaluation](docs/robustness.md)
+- [Evaluation metric definitions](docs/evaluation.md)
+- [API usage](docs/api.md)
+- [Colab and Kaggle notebooks](docs/notebooks.md)
+- [Execution modes and notebook flags](docs/execution_modes.md)
+- [Reproducibility](docs/reproducibility.md)
+- [Data card](docs/data_card.md)
+- [Model card](docs/model_card.md)
+- [Troubleshooting](docs/troubleshooting.md)
 
 ## Ethical limitations
 
 - **"Dataset gender-label prediction"**, not "gender prediction" -- the
-  output reflects a label defined by whichever dataset you train on, not a
-  determination of a person's gender identity. Class names default to the
-  neutral `gender_label_0` / `gender_label_1` and are only ever displayed
-  differently if you explicitly configure alternative names based on your
-  dataset's own documentation (`GENDER_LABEL_0`/`GENDER_LABEL_1` in `.env`,
-  or `model.gender_head.class_names` in `configs/model.yaml`).
+  output reflects a label defined by whichever dataset you train on, not
+  a determination of a person's gender identity. Class names default to
+  the neutral `gender_label_0` / `gender_label_1`.
 - Dataset labels may be binary, incomplete, inaccurate, self-reported,
   annotator-assigned, or culturally limited.
-- Race/ethnicity metadata (when present, e.g. in UTKFace) is **never** used
-  as a feature, prediction target, or split criterion.
-- Uploaded images are processed in memory and **not persisted to disk** by
-  the API by default.
+- Race/ethnicity metadata (when present, e.g. in UTKFace) is **never**
+  used as a feature, prediction target, or split criterion.
+- Uploaded images are processed in memory and **not persisted to disk**
+  by the API by default.
 - This system has not been validated for, and must not be used for:
   employment, policing, surveillance, identity verification, medical
   diagnosis, admissions, insurance, or any other high-impact decision.
 - Grad-CAM output is a gradient-weighted visualization, **not proof of
   causality** and not an explanation of the model's reasoning.
 
-## Architecture
-
-```
-Input face image
-      |
-      v
-Custom ResNet-18 backbone (manually implemented, block layout [2,2,2,2])
-      |
-      v
-Shared feature vector z (512-d)
-      |
-      +----------------------+----------------------+
-      |                                             |
-      v                                             v
-Age Adapter (residual bottleneck)          Gender Adapter (residual bottleneck)
-      |                                             |
-      v                                             v
-Age Quantile Head                          Gender Classification Head
-  -> q10, q50, q90                            -> probabilities, or "Not sure"
-```
-
-- **Backbone**: `src/models/custom_resnet.py` -- hand-written `BasicBlock`
-  residual blocks, manual downsampling (strided 1x1 conv + BN shortcuts),
-  stem conv + BN + ReLU + max-pool, adaptive average pooling, 512-d
-  embedding. **No `torchvision.models`, `timm`, Hugging Face vision
-  models, or downloaded pretrained checkpoints anywhere in this repo.**
-  The only way to initialize non-random weights is a checkpoint produced
-  by this repository (supervised training or the optional SimCLR-style
-  pretraining) or a compatible local file you explicitly point at.
-- **Adapters**: `src/models/adapters.py` -- `adapter_output = z + up(dropout(gelu(down(z))))`,
-  configurable bottleneck dimension (default 256), near-identity at
-  initialization (zero-initialized up-projection).
-- **Heads**: `src/models/heads.py` -- age quantile head (safe
-  `q50, q50 - softplus(.), q50 + softplus(.)` parameterization guaranteeing
-  `q10 <= q50 <= q90`) and a softmax gender classification head.
-- **Loss balancing**: `src/losses/multitask_loss.py` -- fixed weights or
-  learned homoscedastic-uncertainty weighting, with masked losses so a
-  task with no labels in a batch contributes nothing.
-- **Backbone selection**: config-driven (`model.backbone.name` in
-  `configs/model.yaml`) via `src/models/backbone_factory.py`. Default and
-  main research backbone is `custom_resnet18`; `simple_cnn`
-  (`src/models/simple_cnn.py`, a conventional non-residual CNN) exists
-  solely as a controlled baseline for Experiment 0 -- see
-  [Plain CNN vs. Custom ResNet-18 backbone comparison](#plain-cnn-vs-custom-resnet-18-backbone-comparison-experiment-0).
-
-## Results
-
-Real numbers from an actual training run on UTKFace (via the Kaggle API,
-default configs unless noted) -- not fabricated placeholders. Reproduce
-with `make experiments`, `make build-knn`, `make evaluate --compare-knn`,
-`make robustness`, and `make architecture-report`; see
-`docs/architecture_analysis_generated.md` for the full, regenerated
-report after you run the pipeline yourself.
-
-### Architecture parameter comparison (Experiments A-D)
-
-| Experiment | Backbone params | Adapter params | Total params |
-|---|---|---|---|
-| A -- separate backbones | 22,353,024 | 0 | 22,484,997 |
-| B -- shared, no adapters | 11,176,512 | 0 | 11,308,485 |
-| C -- shared + adapters | 11,176,512 | 263,424 | 11,571,909 |
-| D -- shared + adapters + learned balancing | 11,176,512 | 263,424 | 11,571,911 |
-
-Sharing the backbone (B/C/D) roughly halves parameter count versus
-independent backbones (A); adapters add back only ~2.4% of the shared
-backbone's parameters per task. *Per-experiment accuracy/MAE comparison
-(does sharing + adapters actually help, not just cost fewer parameters)
-requires re-running `scripts/evaluate.py` against each experiment's
-checkpoint and isn't included here yet -- the sections below reflect one
-specific (shared-backbone + adapters) checkpoint, not a cross-experiment
-comparison.*
-
-### Parametric model vs. k-NN baseline (shared-backbone + adapters model)
-
-| Metric | Parametric | k-NN (k=15) |
-|---|---|---|
-| Age MAE | 5.71 | 5.79 |
-| Age RMSE | 8.32 | 8.53 |
-| q10-q90 interval coverage | 0.79 | 0.91 |
-| Mean interval width | 16.79 | 26.88 |
-| Gender-label accuracy | 0.970 | 0.966 |
-| Abstention rate | 0.192 | 0.179 |
-| Latency per image (ms) | 1.8 | 2.0 |
-
-The k-NN baseline is competitive on gender-label accuracy and reaches
-*higher* interval coverage than the (uncalibrated) parametric model, at
-the cost of much wider intervals -- consistent with a non-parametric
-method being more conservative rather than more precise here.
-
-### Gradient interference and representation similarity
-
-Measured on the shared-backbone + adapters model (30 sampled batches;
-see [Gradient interference and representation similarity](#gradient-interference-and-representation-similarity)
-below for methodology):
-
-- Mean task-gradient cosine similarity: **+0.08** (std 0.33) -- weakly
-  positive, i.e. the age and gender-label gradients are not strongly in
-  conflict on this dataset/split, with meaningful batch-to-batch variance.
-- Linear CKA: shared-vs-age-adapter **0.79**, shared-vs-gender-adapter
-  **0.90**, age-vs-gender-adapter **0.59** -- the gender adapter moves
-  the shared representation less than the age adapter does, and the two
-  adapters diverge from each other more than either diverges from the
-  shared embedding.
-
-### Robustness (deterministic corruptions, severity 1 of 3)
-
-| Condition | Age MAE | Gender accuracy |
-|---|---|---|
-| Clean (no corruption) | 5.52 | 0.975 |
-| Gaussian blur | 5.72 | 0.953 |
-| Low resolution | 5.82 | 0.934 |
-| Low brightness | 6.21 | 0.962 |
-| JPEG compression | 6.60 | 0.960 |
-| High brightness | 6.80 | 0.947 |
-| Partial crop | 8.50 | 0.868 |
-| **Partial occlusion** | **13.35** | 0.765 |
-| **Gaussian noise** | **14.82** | 0.960 |
-
-Gaussian noise and partial occlusion are, by a wide margin, the most
-damaging conditions for age estimation in this run; gender-label
-accuracy degrades more gracefully except under occlusion.
-
-*(All numbers above are from one real training run and one dataset
-split -- see [Results depend on your data](#results-depend-on-your-data);
-they are not a claim about performance on any other dataset, population,
-or camera.)*
-
-## Repository layout
-
-See the full tree in `docs/` if needed; top level:
-
-```
-configs/       YAML configuration (data, model, training, experiments, robustness, api)
-src/           Library code (data, models, losses, training, evaluation, inference, api, utils)
-scripts/       CLI entry points (one per pipeline stage)
-tests/         Pytest suite, including a synthetic-data smoke training test
-frontend/      React + TypeScript + Vite + Tailwind dashboard
-docs/          Architecture analysis, experiment plan, model/data cards, reproducibility
-data/          Local dataset (never committed); splits; not tracked by git
-checkpoints/   Trained model checkpoints (never committed)
-experiments/   Isolated per-experiment/seed run trees (checkpoints, calibration,
-               metrics, plots, robustness, knn) from run_seeds.py/run_experiments.py
-outputs/       Cross-run artifacts: architecture_analysis, backbone_comparison,
-               gradcam, reports, data_quality (single global outputs/calibration
-               or outputs/robustness are never used by the isolated pipeline above)
-```
-
-## Setup
-
-Requirements: Python 3.11+ (3.10+ also works), Node.js 20+/npm for the
-frontend.
-
-```bash
-git clone <this-repo>
-cd face-multitask-research
-python -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cp .env.example .env              # fill in Kaggle credentials if using Kaggle data
-cd frontend && npm install && cd ..
-```
-
-Or simply: `make install`
-
-## Kaggle API setup
-
-1. Create a Kaggle account, then create an API token at
-   <https://www.kaggle.com/settings> ("Create New Token"). This downloads
-   `kaggle.json` -- do not commit it.
-2. Set environment variables (in `.env`, sourced by your shell, or
-   directly in your environment):
-   ```
-   KAGGLE_USERNAME=<your-username>
-   KAGGLE_KEY=<your-key>
-   KAGGLE_DATASET_SLUG=<owner>/<dataset-name>   # e.g. jangedoo/utkface-new
-   ```
-3. Run `make download-data` (wraps `scripts/download_kaggle_data.py`). It
-   validates credentials, downloads via the official `kaggle` package
-   (no scraping), extracts into `data/raw/`, skips re-downloading unless
-   `--force` is passed, and writes `data/raw/manifest.json` with the
-   slug, timestamp, and file/image counts.
-
-If credentials or the dataset slug are missing, the script prints setup
-instructions and exits non-zero instead of failing silently.
-
-## Dataset format
-
-**UTKFace-style (default, `DATASET_SOURCE=utkface`)**: filenames
-`age_gender_race_date.jpg`, e.g. `25_0_2_20170116174525125.jpg` (age=25,
-gender_label=0, race=2 -- race is metadata only, never a model input).
-
-**Generic CSV (`DATASET_SOURCE=csv`)**: configure `configs/data.yaml`'s
-`dataset.csv` block with your dataset's image root, metadata CSV path, and
-column names for image path / age / gender-label / (optional) split /
-(optional) subject ID / (optional) raw-value-to-{0,1} label mapping.
-Missing age or gender-label values are allowed (masked out of the loss);
-rows missing both are dropped.
-
-See `docs/data_card.md` for full details.
-
-## Data validation workflow
-
-```bash
-make prepare-data
-```
-
-Runs `scripts/prepare_data.py`: parses raw metadata, drops
-corrupt/unreadable images and duplicate paths/content (SHA-256 hash),
-reports age/gender-label distributions and image-size stats to
-`outputs/data_quality/data_quality_report.json`, and writes a deterministic,
-leakage-checked (subject-level when possible) **four-way** split to
-`data/splits/full_metadata_with_splits.csv`. This split is reused by every
-experiment so results are comparable.
-
-**Split protocol** (`configs/data.yaml: split.*_fraction`, default
-60/15/10/15): each split is used for exactly one purpose, so no data ever
-informs a decision it shouldn't --
-
-| Split | Used for | Never used for |
-|---|---|---|
-| `train` | model fitting (gradient updates) | anything else |
-| `validation` | early stopping + checkpoint selection (`make train`) | fitting conformal intervals, final metrics |
-| `calibration` | fitting split-conformal age intervals (`make calibrate`) | early stopping, final metrics |
-| `test` | final evaluation, touched once per checkpoint | model/checkpoint selection, calibration |
-
-## Training
-
-```bash
-make train                                   # single default configuration
-make train ARGS="--set model.architecture=shared_no_adapters"   # override any config key
-```
-
-Runs `scripts/train.py`, which uses `src/training/trainer.py`'s
-progressive Stage A -> B -> C fine-tuning (or a single supervised warm-up
-stage with a logged warning if no pretrained backbone checkpoint is
-configured -- freezing a randomly initialized backbone isn't scientifically
-meaningful). Saves three "best" checkpoints (lowest val age MAE, highest
-val gender accuracy, best balanced score), training curves, and a
-parameter breakdown to `outputs/` and `checkpoints/`.
-
-## Self-supervised pretraining (optional)
-
-```bash
-make pretrain
-```
-
-Runs a lightweight SimCLR-style contrastive pretraining pass
-(`scripts/pretrain.py` / `src/training/pretrain.py`) on the same Custom
-ResNet-18 backbone with a separate projection head (discarded after
-pretraining). Saves `checkpoints/simclr_encoder.pt`; point
-`model.pretrained_checkpoint` at it to enable staged fine-tuning and
-Experiment F. This is optional and more compute-hungry than supervised
-training -- see `docs/reproducibility.md`.
-
-## Architecture ablation experiments
-
-```bash
-make experiments
-```
-
-Runs `scripts/run_experiments.py` against `configs/experiments.yaml`
-(Experiments 0/0b/0c, A-F, see `docs/experiment_plan.md`), reusing the same
-split for all of them. Experiment E (parametric vs. kNN) and Experiment F
-(pretrained vs. scratch, only if a pretrained checkpoint exists) are
-handled via the dedicated commands below rather than a fresh training run.
-
-Every experiment's checkpoint, conformal calibration artifact, and
-evaluation metrics/plots are written into an isolated
-`experiments/<experiment>/seed_<seed>/{checkpoints,calibration,metrics,plots,robustness,knn}`
-directory (`src/utils/experiment_paths.py`) -- never a shared global
-`checkpoints/` or `outputs/calibration`/`outputs/robustness` two
-experiments or seeds could silently collide in. `scripts/run_experiments.py`
-and `scripts/run_seeds.py` calibrate each checkpoint (`scripts/calibrate.py`)
-immediately after training it and before evaluating it with calibration
-applied; the calibration artifact records the checkpoint's SHA-256, the
-split CSV's SHA-256, and an ordered test-sample-ID hash, and
-`scripts/evaluate.py`/`scripts/run_robustness.py` validate those against
-whatever they're evaluating and raise loudly on any mismatch (see
-`src/evaluation/calibration.py:validate_calibration_artifact`) -- a stale
-or cross-experiment/cross-seed calibration artifact can never be silently
-applied.
-
-### Plain CNN vs. Custom ResNet-18 backbone comparison (Experiment 0)
-
-The plain CNN baseline (`src/models/simple_cnn.py`, a conventional
-non-residual stack of Conv+BN+ReLU+MaxPool blocks) isolates the value of
-residual connections. It uses the same multi-task heads, adapters,
-learned loss balancing, data split, training setup, and evaluation
-metrics as Experiment D -- so any performance difference is attributable
-primarily to the backbone design (residual vs. plain), not to unrelated
-pipeline changes. It is a controlled baseline only, never the project's
-main architecture, and this is not a general CNN-architecture benchmark
-(no MobileNet/EfficientNet/ViT/pretrained weights are involved).
-
-```bash
-# Run only the plain CNN baseline
-python scripts/run_experiments.py --only exp_0_simple_cnn_shared_adapters_learned_balance
-
-# Run the controlled CNN-vs-ResNet comparison (Experiment 0 + Experiment D)
-python scripts/run_experiments.py --only exp_0_simple_cnn_shared_adapters_learned_balance,exp_d_shared_adapters_learned_balance
-
-# Regenerate the research report, including the
-# "Plain CNN vs Custom ResNet-18 Backbone Comparison" section
-python scripts/generate_architecture_report.py --checkpoint checkpoints/exp_d_shared_adapters_learned_balance_best_balanced_score.pt
-```
-
-Backbone selection is config-driven (`model.backbone.name:
-custom_resnet18 | simple_cnn | plain_deep18_no_skip` in `configs/model.yaml`);
-all three backbones expose the same `forward` / `forward_features`
-(`layer1`-`layer4`, for Grad-CAM compatibility) / `num_parameters`
-interface, so the rest of the pipeline (adapters, heads, trainer,
-evaluation, inference, Grad-CAM) is unmodified by which one is active.
-
-**Important caveat.** SimpleCNN also differs from Custom ResNet-18 in
-depth and stage widths, not only in the absence of skip connections -- so
-Experiment 0 vs. D is an **efficiency/accuracy trade-off** comparison, not
-a clean test of whether residual connections themselves help. Do not treat
-a ResNet win here as evidence that skip connections are what caused it.
-
-### PlainDeep18NoSkip vs. Custom ResNet-18 (Experiment 0b): the actual residual-connections ablation
-
-`src/models/plain_deep18_no_skip.py`'s `PlainDeep18NoSkip` copies Custom
-ResNet-18's stem, stage widths, block layout `[2, 2, 2, 2]`, embedding
-size, and training recipe *exactly*, removing only the residual additions
--- so any difference here is attributable to skip connections specifically,
-holding depth/width fixed. See `docs/experiment_plan.md` for the exact
-(unavoidable) parameter difference this implies (173,824 parameters --
-the three downsample shortcuts residual connections require and this
-backbone doesn't).
-
-```bash
-# Train all three backbones for the full comparison suite
-python scripts/run_experiments.py --only exp_0_simple_cnn_shared_adapters_learned_balance,exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance,exp_d_shared_adapters_learned_balance
-```
-
-### Comprehensive backbone comparison suite (`scripts/compare_backbones.py`)
-
-Post-hoc analysis across two or more already-trained checkpoints --
-**never retrains**, only re-runs inference (a single forward pass per
-test-set image) against each checkpoint's own test split:
-
-```bash
-python scripts/compare_backbones.py \
-    --checkpoint simple_cnn=experiments/exp_0_simple_cnn_shared_adapters_learned_balance/seed_42/checkpoints/exp_0_simple_cnn_shared_adapters_learned_balance_best_balanced_score.pt \
-    --checkpoint plain_deep18_no_skip=experiments/exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance/seed_42/checkpoints/exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance_best_balanced_score.pt \
-    --checkpoint custom_resnet18=experiments/exp_d_shared_adapters_learned_balance/seed_42/checkpoints/exp_d_shared_adapters_learned_balance_best_balanced_score.pt \
-    --calibration-dir simple_cnn=experiments/exp_0_simple_cnn_shared_adapters_learned_balance/seed_42/calibration \
-    --calibration-dir plain_deep18_no_skip=experiments/exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance/seed_42/calibration \
-    --calibration-dir custom_resnet18=experiments/exp_d_shared_adapters_learned_balance/seed_42/calibration \
-    --robustness-csv simple_cnn=experiments/exp_0_simple_cnn_shared_adapters_learned_balance/seed_42/robustness/robustness_results.csv \
-    --robustness-csv custom_resnet18=experiments/exp_d_shared_adapters_learned_balance/seed_42/robustness/robustness_results.csv \
-    --resnet-name custom_resnet18 \
-    --output-dir outputs/backbone_comparison
-```
-
-(Optionally add `--checkpoint custom_resnet18_no_zero_init=experiments/exp_0c_.../seed_42/checkpoints/..._best_balanced_score.pt` for the zero-init-residual ablation -- see `docs/final_evaluation_protocol.md`.)
-
-Produces, under `--output-dir`:
-
-- `clean_test_summary.csv` -- age MAE/RMSE, median/p90/p95 absolute age
-  error, error-tail rates (>5/>10/>15/>20 years), raw and calibrated
-  interval coverage/width, gender-label **selective accuracy** (correct /
-  accepted only), **coverage** (fraction answered, `1 - abstention_rate`),
-  and **effective accuracy** (correct-and-accepted / *all* samples,
-  denominator includes abstentions) -- plus parameter counts and latency.
-  Selective accuracy can look excellent while effective accuracy is
-  mediocre if a model abstains constantly; both numbers are reported so
-  this can't be hidden. `plots/pareto_params_vs_mae.png` and
-  `pareto_latency_vs_mae.png` visualize the trade-off.
-- `gender_risk_at_coverage.csv`, `gender_aurc.json`,
-  `gender_pairwise_bootstrap.json`, `gender_aurc_bootstrap.json`,
-  `plots/gender_risk_coverage.png` -- gender selective-risk-vs-coverage
-  curves (confidence = max class probability), AURC (lower is better),
-  risk at 80/90/95/98% coverage with paired-bootstrap CIs for the
-  ResNet-vs-other difference *at each coverage level*
-  (`gender_pairwise_bootstrap.json`), and a **separate** paired-bootstrap
-  CI on the **AURC summary statistic itself**
-  (`gender_aurc_bootstrap.json`) -- only the latter is treated as
-  sufficient evidence for a "ResNet has lower AURC" claim; a CI at one
-  fixed coverage level is not. Models are always compared at the *same*
-  coverage, never at independent arbitrary thresholds, and only after
-  verifying both models share the identical, index-aligned test-sample
-  IDs (not just equal sample counts).
-- `age_selective_mae_at_coverage.csv`, `age_selective_aurc.json`,
-  `age_pairwise_bootstrap.json`, `age_aurc_bootstrap.json`,
-  `plots/age_risk_coverage_{mae,rmse}.png` -- the same analysis (including
-  the AURC-vs-fixed-coverage CI distinction above) for age, using
-  q90-q10 interval width as the confidence score (narrower = more confident).
-- `age_bucket_mae.csv`, `age_error_percentiles.json`,
-  `plots/age_error_cdf.png`, `plots/age_tail_error_rates.png` -- per-age-bucket
-  MAE (0-12/13-19/20-34/35-49/50-64/65+), the empirical CDF of absolute
-  age error per model, and error-tail-rate bars -- answers whether ResNet
-  reduces catastrophic errors even when average MAE is similar.
-- `robustness_degradation_<model>.csv`, `robustness_diff_table.csv`
-  (when `--robustness-csv` is given per model) -- delta and relative
-  (%) degradation from the clean baseline per corruption/severity, plus
-  **every pairwise** model-vs-model difference (not just the first two by
-  argument order) -- with three models this includes SimpleCNN-vs-ResNet,
-  PlainDeep18NoSkip-vs-ResNet, and SimpleCNN-vs-PlainDeep18NoSkip all at once.
-- `final_interpretation.md` -- "Is Additional Residual Complexity
-  Justified?": credits ResNet only when a paired-bootstrap CI excludes
-  zero in its favor, and explicitly states the compact/plain alternative
-  is preferred otherwise. Never treats a single-seed difference as
-  decisive.
-
-Both notebooks (`notebooks/train_evaluate_*.ipynb`) run this automatically
-when `RUN_PROFILE = "backbone_comparison"`.
-
-## Conformal calibration
-
-```bash
-make calibrate CHECKPOINT=checkpoints/<your_checkpoint>.pt
-# or, with explicit isolation/provenance (what run_experiments.py/run_seeds.py do internally):
-python scripts/calibrate.py --checkpoint <checkpoint>.pt --calibration-dir <isolated_dir> --experiment-name <name> --seed <seed>
-```
-
-Fits split-conformal calibration (`src/evaluation/calibration.py`) on the
-**dedicated calibration split only** -- deliberately not the validation
-split, which is reserved for early stopping/checkpoint selection, so no
-single split is used for two different decisions. Saves the offset to
-`conformal_calibration.json` under `--calibration-dir` (default:
-`configs/training.yaml: calibration.output_dir`). Reports coverage/width
-before and after calibration on the test set (touched only here, once)
-(`calibration_test_effect.json` alongside it). The API and `Predictor`
-only ever describe an interval as "calibrated" when this artifact exists
-and loaded successfully.
-
-**Provenance and mismatch protection.** Every calibration artifact records
-the checkpoint's SHA-256, the split CSV's SHA-256, an ordered
-test-sample-ID hash, the experiment name, seed, alpha, and target
-coverage. `scripts/evaluate.py` and `scripts/run_robustness.py` validate a
-loaded calibration artifact's recorded provenance against the checkpoint
-and split actually being evaluated (`validate_calibration_artifact`) and
-raise `CalibrationMismatchError` loudly on any mismatch -- e.g. applying
-seed 42's calibration to seed 123's checkpoint, or a SimpleCNN checkpoint
-to a calibration artifact fit for ResNet. `scripts/run_seeds.py` and
-`scripts/run_experiments.py` never fall back to a shared global
-`outputs/calibration/` -- every checkpoint gets calibrated into its own
-isolated `experiments/<experiment>/seed_<seed>/calibration/` directory
-before being evaluated with calibration applied.
-
-## k-NN non-parametric baseline
-
-```bash
-make build-knn CHECKPOINT=checkpoints/<your_checkpoint>.pt
-```
-
-Extracts L2-normalized embeddings from the training split
-(`src/evaluation/knn_baseline.py`, backed by `sklearn.neighbors.NearestNeighbors`),
-fits a distance-weighted k-NN index (default k=15) separately for the age
-and gender-label embedding spaces, and saves it to
-`outputs/knn/knn_baseline.pkl`. Compare against the parametric model with:
-
-```bash
-make evaluate CHECKPOINT=checkpoints/<your_checkpoint>.pt
-```
-
-(`scripts/evaluate.py --compare-knn`, producing
-`{output_dir}/knn/{output_name}_parametric_vs_knn.csv` -- isolated per
-checkpoint/experiment under that checkpoint's own configured output
-directory, never a single shared global path, so evaluating multiple
-checkpoints with `--compare-knn` never overwrites another experiment's
-comparison table. The saved metrics JSON also records this exact path
-under `knn_comparison_table_path`, so downstream code never has to guess it).
-
-## Robustness evaluation
-
-```bash
-make robustness CHECKPOINT=checkpoints/<your_checkpoint>.pt
-# or, explicitly:
-python scripts/run_robustness.py --checkpoint <checkpoint>.pt \
-    --output-dir <isolated_dir>/robustness --calibration-dir <isolated_dir>/calibration \
-    [--max-samples N]
-```
-
-Evaluates the **full test split by default** (touched only for this, plus
-final evaluation -- never for training or model selection) under 11
-deterministic corruption types x 3 severities (`configs/robustness.yaml`,
-`src/evaluation/robustness.py`): Gaussian blur, Gaussian noise, low
-resolution (resize degradation), JPEG compression, low/high brightness,
-low/high contrast, grayscale conversion, partial occlusion, partial crop.
-`--max-samples` deterministically **stratified-samples** by age bucket x
-gender label down to about that many rows for faster iteration, instead
-of truncating to whichever rows happen to sort first in the split CSV
-(which could silently exclude an entire subgroup); the sampled IDs and
-sampling metadata are saved to `sampling_metadata.json`.
-
-For every condition, reports age MAE, gender-label accuracy, abstention
-rate, confidence, and interval width -- **both raw and, when a calibration
-artifact is available, conformal-calibrated** (the fixed offset from the
-clean calibration split, never refit per corruption) -- compared against
-the clean baseline. Output defaults to a checkpoint/experiment/seed-specific
-directory (the same checkpoint's own isolated
-`experiments/<experiment>/seed_<seed>/robustness/`, if the checkpoint lives
-in that layout), never a single shared global `outputs/robustness/` two
-checkpoints could silently overwrite. Saves `robustness_results.csv`,
-`robustness_degradation.csv`, both performance-vs-severity and
-degradation-vs-severity plots per metric, sample corrupted images, and a
-Markdown summary. Every corruption is deterministic for a fixed seed
-(`configs/robustness.yaml: robustness.seed`), so the same corrupted images
-are shown to every model compared.
-
-For a multi-model comparison, `src/evaluation/robustness.py` additionally
-provides `compute_degradation()` (adds `{metric}_delta` and
-`{metric}_pct_change` columns relative to the clean row) and
-`build_robustness_diff_table()` (a direct model-vs-model difference table)
--- both are wired into `scripts/compare_backbones.py --robustness-csv`
-(see "Comprehensive backbone comparison suite" above).
-
-## Grad-CAM explainability
-
-```bash
-make gradcam CHECKPOINT=checkpoints/<your_checkpoint>.pt
-```
-
-Manually implemented Grad-CAM (`src/evaluation/gradcam.py`, no external
-Grad-CAM library) at the last residual stage (`layer4` by default).
-Generates **separate** heatmaps for the age (q50) and gender-label
-(selected class logit) decisions across correct, incorrect,
-low-confidence, and blurred examples, saved to `outputs/gradcam/`. Always
-labeled "Model attention visualization" -- never described as proof of
-causality or an explanation of reasoning.
-
-## Backend (FastAPI)
-
-```bash
-make api
-```
-
-Starts Uvicorn on `:8000`. Endpoints:
-
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/health` | Liveness + whether a model is loaded |
-| GET | `/models` | Active model/version/checkpoint info |
-| POST | `/quality-check` | Image-quality diagnostics only (no model needed) |
-| POST | `/predict` | Full prediction (`?include_gradcam=true&include_knn=true` optional) |
-| POST | `/predict/compare` | Prediction with k-NN comparison always included |
-| POST | `/predict/gradcam` | Prediction with Grad-CAM always included |
-| POST | `/admin/reload-models` | Reload checkpoint/calibration/kNN index from disk |
-
-Uploaded images are processed in memory and are not persisted to disk by
-default.
-
-**Face-region preprocessing.** Since the model is trained on tightly
-face-cropped images (e.g. UTKFace), `/predict` and friends first try to
-crop to the largest detected face using a classical Haar cascade
-(`src/inference/face_detection.py` -- OpenCV's bundled Viola-Jones
-detector, not a neural network, no pretrained weights downloaded), so an
-arbitrary uploaded photo (with background, clothing, hair styling, etc.)
-is closer to what the model actually learned from. **If no face is
-found, the API declines to generate an age or dataset gender-label
-prediction at all** (`age`/`gender`/`gradcam` are returned as `null`,
-with a warning explaining why) rather than running the model on a
-non-face image and returning a confident-looking but meaningless
-result -- e.g. a photo of an object or an animal should not receive an
-age or gender-label guess. Toggle via `api.enable_face_detection` /
-`api.face_margin_ratio` in `configs/api.yaml`. This is a real but
-classical/moderate-accuracy detector -- it can miss faces at extreme
-angles, in poor lighting, or when occluded, and does not perform
-identity verification or any other biometric function.
-
-## Frontend (React)
-
-```bash
-make frontend
-```
-
-Starts the Vite dev server on `:5173` (proxies `/api` to `:8000`, see
-`frontend/vite.config.ts`). Drag-and-drop upload, image preview, privacy
-notice, age/gender/uncertainty/quality/Grad-CAM/kNN-comparison panels, and
-a visible research disclaimer, built with Tailwind CSS.
-
-## Demo mode
-
-A single command for a live course demonstration, instead of starting the
-backend and frontend in two separate terminals:
-
-```bash
-make demo
-```
-
-This first runs a readiness check (`scripts/check_demo_readiness.py`)
-confirming a trained checkpoint and a conformal calibration artifact exist
-(warning, but not blocking, if the optional k-NN index is missing), then
-launches Uvicorn and the Vite dev server together as subprocesses,
-printing both URLs. Ctrl+C stops both. If the readiness check fails, fix
-the reported item (e.g. `make train` then `make calibrate`) or pass
-`--skip-readiness-check` to `python scripts/run_demo.py` to launch anyway.
-
-Five synthetic placeholder "face" images (procedurally drawn with PIL, no
-real person, no dataset content) live in `data/demo_images/` for quick
-upload during a demo -- see `data/demo_images/README.md`. Regenerate them
-with `make demo-images`. Because they're cartoon shapes rather than
-photographs, the classical face detector may decline to predict on some
-of them; that's expected, and itself demonstrates the system's
-decline-rather-than-guess safety behavior described above. For a demo
-that reliably shows a full prediction, upload your own consented photo
-through the frontend instead.
-
-## Colab and Kaggle notebooks
-
-Two polished, self-contained notebooks run the entire research pipeline
-(setup, dependency install, data validation, tests, the controlled
-plain-CNN-vs-Custom-ResNet-18 comparison, calibration, evaluation, optional
-robustness/Grad-CAM/k-NN analyses, multi-seed aggregation, and a final
-report + archive) end to end on a hosted GPU runtime, without needing a
-local machine:
-
-- **`notebooks/train_evaluate_colab.ipynb`** -- for Google Colab. Clones the
-  repo under `/content/AgeGender`, trains under `/content` for speed, and
-  synchronizes checkpoints/metrics/plots/reports to Google Drive after every
-  major phase (never raw dataset images, unless you explicitly enable that).
-  Use this if you want a persistent Drive record across Colab session
-  recycling, or plan to run the notebook over several sessions.
-- **`notebooks/train_evaluate_kaggle.ipynb`** -- for Kaggle Notebooks. Clones
-  the repo under `/kaggle/working/AgeGender`, uses an attached Kaggle input
-  dataset (or the Kaggle API) for data, never mounts Google Drive, and
-  produces a downloadable `AgeGender_<RUN_ID>.zip` under Kaggle's Output tab.
-  Use this if your dataset is already a Kaggle Dataset, or you prefer
-  Kaggle's free GPU quota over Colab's.
-
-Both notebooks are pure orchestration around this repository's real
-`scripts/*.py` -- they never reimplement model, dataset, training, or
-evaluation logic. Each run gets its own timestamped, non-overwriting run
-directory (`config/`, `logs/`, `tests/`, `checkpoints/`, `metrics/`,
-`plots/`, `calibration/`, `reports/`, `manifests/`, `archives/`,
-`experiments/<name>/seed_<seed>/`, ...), and defaults to `RUN_PROFILE="core"`
-(the two-experiment SimpleCNN-vs-ResNet comparison, 30 max epochs, patience
-8, seed 42). Set `RUN_PROFILE="backbone_comparison"` to also train
-PlainDeep18NoSkip (Experiment 0b) and run the full comparison suite
-(`scripts/compare_backbones.py`) automatically. See each notebook's first
-two cells for the full configuration options (`RUN_PROFILE`, `SEEDS`,
-`RUN_ROBUSTNESS`, `RUN_GRADCAM`, `RUN_KNN`, `RUN_MULTI_SEED`, etc.).
-
-**Stage-level restart-safety.** With `FORCE_RERUN=False` and
-`RESUME_RUN_ID` set to a previous run's printed ID, each of training,
-calibration, k-NN index building, and evaluation is independently
-skipped-or-rerun based only on whether *that stage's own* artifact already
-exists -- printed up front as a per-experiment stage plan (e.g. "training:
-skipped, checkpoint found" / "evaluation: rerunning, metrics missing"). A
-failure in a later stage (e.g. evaluation) never triggers retraining a
-checkpoint that already completed successfully. This is not resumption of
-an interrupted training run mid-epoch -- checkpoints in this repository
-never save optimizer state (`src/training/checkpointing.py`), so a stage
-that was interrupted partway through re-runs from its own beginning, not
-from a mid-epoch point.
-
-**Rerunning post-hoc analysis without retraining.** Since training,
-calibration, and evaluation are all skipped once their artifacts exist,
-simply re-running the notebook with the same `RESUME_RUN_ID` and
-`FORCE_RERUN=False` re-executes only whatever hasn't been produced yet
-(typically the report/analysis cells) -- nothing upstream is retrained. To
-do the same thing outside a notebook against existing checkpoints:
-```bash
-python scripts/compare_backbones.py \
-    --checkpoint simple_cnn=checkpoints/exp_0_..._best_balanced_score.pt \
-    --checkpoint custom_resnet18=checkpoints/exp_d_..._best_balanced_score.pt \
-    --resnet-name custom_resnet18 --output-dir outputs/backbone_comparison
-python scripts/generate_final_report.py
-```
-
-**Running only the new three-seed backbone comparison.** Set
-`RUN_PROFILE="backbone_comparison"` and `RUN_MULTI_SEED=True` (with
-`SEEDS=[42, 123, 2026]`, the default) in either notebook's configuration
-cell -- section 16 will then train Experiments 0/0b/D at all three seeds
-and save `reports/multiseed_summary.{csv,md}`. Outside a notebook:
-```bash
-python scripts/run_seeds.py --experiment exp_0_simple_cnn_shared_adapters_learned_balance --seeds 42,123,2026
-python scripts/run_seeds.py --experiment exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance --seeds 42,123,2026
-python scripts/run_seeds.py --experiment exp_d_shared_adapters_learned_balance --seeds 42,123,2026
-```
-
-**Running only robustness evaluation** (checkpoints already trained). With
-the isolated layout above, `--output-dir`/`--calibration-dir` default to
-that same checkpoint's own `robustness/`/`calibration/` subdirectories, so
-they don't need to be passed explicitly:
-```bash
-python scripts/run_robustness.py --checkpoint experiments/exp_0_simple_cnn_shared_adapters_learned_balance/seed_42/checkpoints/exp_0_simple_cnn_shared_adapters_learned_balance_best_balanced_score.pt
-python scripts/run_robustness.py --checkpoint experiments/exp_d_shared_adapters_learned_balance/seed_42/checkpoints/exp_d_shared_adapters_learned_balance_best_balanced_score.pt
-```
-Or in a notebook: set `RUN_ROBUSTNESS=True` and the other `RUN_*` optional
-flags to `False`, then re-run with `RESUME_RUN_ID` set and
-`FORCE_RERUN=False` -- training/calibration/evaluation are skipped (already
-complete) and only the robustness cell executes.
-
-## Example API requests
-
-```bash
-curl http://localhost:8000/health
-
-curl -X POST http://localhost:8000/quality-check \
-  -F "file=@/path/to/face.jpg"
-
-curl -X POST "http://localhost:8000/predict?include_gradcam=true&include_knn=true" \
-  -F "file=@/path/to/face.jpg"
-```
-
-Example (abridged) `/predict` response shape, when a face was detected:
-
-```json
-{
-  "age": {"q10": 24.1, "q50": 29.4, "q90": 35.2, "q10_calibrated": 22.8, "q90_calibrated": 36.9, "is_calibrated": true},
-  "gender": {"probabilities": {"gender_label_0": 0.91, "gender_label_1": 0.09}, "predicted_label": "gender_label_0", "confidence": 0.91, "abstained": false, "display_label": "gender_label_0"},
-  "quality": {"width": 512, "height": 512, "brightness": 0.52, "contrast": 0.21, "blur_score": 143.2, "warnings": []},
-  "gradcam": null,
-  "knn_comparison": null,
-  "model_version": "v1",
-  "checkpoint_name": "multitask_best_balanced_score.pt",
-  "face_detected": true,
-  "warnings": [],
-  "latency_ms": 42.3,
-  "disclaimer": "This tool is for research and demonstration only. ..."
-}
-```
-
-...and when no face was detected (`age`/`gender`/`gradcam`/`knn_comparison`
-are all `null` -- no prediction is generated):
-
-```json
-{
-  "age": null,
-  "gender": null,
-  "quality": {"width": 800, "height": 600, "brightness": 0.61, "contrast": 0.30, "blur_score": 210.5, "warnings": []},
-  "gradcam": null,
-  "knn_comparison": null,
-  "model_version": "v1",
-  "checkpoint_name": "multitask_best_balanced_score.pt",
-  "face_detected": false,
-  "warnings": ["No face detected via classical Haar-cascade detection; declining to generate age or dataset gender-label predictions, since the model is only meaningful on face images similar to its training data."],
-  "latency_ms": 8.1,
-  "disclaimer": "This tool is for research and demonstration only. ..."
-}
-```
-
-## Evaluation metric definitions
-
-- **Age MAE / RMSE / R2**: standard regression metrics on q50 vs. true age.
-- **q10-q90 coverage**: fraction of samples where the true age falls inside `[q10, q90]`.
-- **Mean/median interval width**: `q90 - q10`, averaged (or median) across samples.
-- **Calibration error**: `|empirical coverage - target coverage|` for the (nominal 80%) interval.
-- **Age error by bucket**: MAE computed within fixed age ranges (0-10, 10-20, ..., 80+).
-- **Gender-label accuracy**: computed only over non-abstained predictions.
-- **Abstention rate**: fraction of samples where confidence fell below the threshold and "Not sure" was returned.
-
-## Gradient interference and representation similarity
-
-See `docs/architecture_analysis.md` for the full methodology behind
-gradient cosine similarity (age-loss vs. gender-loss gradients w.r.t. the
-shared backbone) and linear CKA (shared embedding vs. each adapter's
-output), and `docs/architecture_analysis_generated.md` (produced by
-`make architecture-report`) for your actual run's numbers.
-
-## Troubleshooting
-
-- **"No trained checkpoint found"** from the API: train a model first
-  (`make train` or `make experiments`) and confirm
-  `configs/api.yaml: api.active_checkpoint` points at a real file, then hit
-  `POST /admin/reload-models`.
-- **Kaggle download fails with a credentials error**: confirm
-  `KAGGLE_USERNAME`/`KAGGLE_KEY`/`KAGGLE_DATASET_SLUG` are set, either in a
-  local `.env` file (copied from `.env.example` -- loaded automatically by
-  `src/utils/config.py:load_env_file()`) or exported directly in your shell
-  (shell exports always take priority over `.env`).
-- **CUDA out of memory**: lower `training.batch_size` in
-  `configs/training.yaml`, or run on CPU (`device: cpu` in
-  `configs/default.yaml`) for small-scale experimentation.
-- **Predictions look wildly wrong / overconfident on a photo that looks
-  fine to you**: check the response's `face_detected` field and
-  `warnings`. The model is trained on tightly face-cropped images (e.g.
-  UTKFace); a photo with a lot of background, heavy styling/makeup,
-  jewelry, or a watermark/overlay across the face is a different visual
-  distribution even when a human would call it "a clear photo of a
-  person," and face-crop preprocessing (see "Face-region preprocessing"
-  above) only partially compensates for that gap. Try a plain,
-  front-facing, tightly-cropped photo to check whether the issue is
-  input distribution rather than a bug.
-- **Frontend can't reach the API**: confirm the backend is running on
-  `:8000` (`curl http://localhost:8000/health`) and that the Vite dev
-  server's proxy config (`frontend/vite.config.ts`) points at it.
-- **Tests fail with `ModuleNotFoundError: src`**: run pytest from the
-  repository root (`pyproject.toml` sets `pythonpath = ["."]`), or
-  `pip install -e .`-equivalent isn't required since tests add the repo
-  root to `sys.path` implicitly via `pytest`'s rootdir behavior.
-
-## Compute requirements
-
-See `docs/reproducibility.md` for a stage-by-stage breakdown. Summary:
-supervised training on a few thousand 128px images is feasible on a single
-consumer GPU in well under an hour per experiment; CPU-only training works
-for small-scale testing/smoke runs but is not recommended for full
-experiments; self-supervised pretraining is markedly more compute-hungry
-than supervised training for a comparable epoch count.
-
-## Results depend on your data
-
-Every number this repository produces -- age MAE, gender-label accuracy,
-interval coverage, robustness curves, gradient interference, CKA -- is a
-property of **the specific dataset, labels, split, and evaluation design
-you use**, not a universal statement about the underlying task. Different
-datasets have different demographic coverage, label quality, and image
-conditions; do not extrapolate results here to populations, cameras, or
-use cases outside the evaluation data. See `docs/data_card.md` and
-`docs/model_card.md`.
+See [docs/model_card.md](docs/model_card.md) and
+[docs/data_card.md](docs/data_card.md) for the full discussion.
+
+## Reproducibility and scope
+
+Every reported number is a property of one specific dataset, split, seed,
+and evaluation design -- not a universal statement about the underlying
+task. All splits are fixed once and reused by every experiment; every
+checkpoint/seed gets its own isolated artifact tree; calibration artifacts
+record and verify provenance (checkpoint/split hashes) before being
+applied; and nothing in this repository hardcodes example metrics as if
+they were real results. Supervised training on a few thousand 128px
+images is feasible on a single consumer GPU in well under an hour per
+experiment. See [docs/reproducibility.md](docs/reproducibility.md) for
+seeds, splits, compute expectations, and notebook details, and
+[docs/data_card.md](docs/data_card.md) for demographic-coverage caveats.
+
+## License / authors
+
+MIT License -- see [LICENSE](LICENSE).

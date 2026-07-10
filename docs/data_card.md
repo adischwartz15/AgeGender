@@ -1,5 +1,26 @@
 # Data Card
 
+## Kaggle API setup
+
+1. Create a Kaggle account, then create an API token at
+   <https://www.kaggle.com/settings> ("Create New Token"). This downloads
+   `kaggle.json` -- do not commit it.
+2. Set environment variables (in `.env`, sourced by your shell, or
+   directly in your environment):
+   ```
+   KAGGLE_USERNAME=<your-username>
+   KAGGLE_KEY=<your-key>
+   KAGGLE_DATASET_SLUG=<owner>/<dataset-name>   # e.g. jangedoo/utkface-new
+   ```
+3. Run `make download-data` (wraps `scripts/download_kaggle_data.py`). It
+   validates credentials, downloads via the official `kaggle` package
+   (no scraping), extracts into `data/raw/`, skips re-downloading unless
+   `--force` is passed, and writes `data/raw/manifest.json` with the
+   slug, timestamp, and file/image counts.
+
+If credentials or the dataset slug are missing, the script prints setup
+instructions and exits non-zero instead of failing silently.
+
 ## Default target dataset
 
 This repository defaults to a UTKFace-style dataset (`DATASET_SOURCE=utkface`
@@ -47,12 +68,17 @@ labels in filenames, set `DATASET_SOURCE=csv` and configure
 
 ## Validation and leakage prevention
 
+```bash
+make prepare-data
+```
+
 `scripts/prepare_data.py` (backed by `src/data/validation.py`) runs before
 any training:
 
 1. Verifies every image path is readable and above a minimum resolution; drops corrupt/unreadable files.
 2. Detects and removes duplicate file paths and duplicate image content (via SHA-256 hash).
-3. Reports age distribution, gender-label distribution, and image-size statistics to `outputs/data_quality/data_quality_report.json`.
+3. Reports age distribution, gender-label distribution, and image-size
+   statistics to `outputs/data_quality/data_quality_report.json`.
 4. Splits into **train / validation / calibration / test** (default fractions 60/15/10/15, `configs/data.yaml: split.*_fraction`) with a fixed seed; splits at the **subject level** (not just image level) when a `subject_id` column is available, so the same person never appears in more than one split.
 5. Asserts no image path or subject_id spans multiple splits before writing `data/splits/full_metadata_with_splits.csv`.
 

@@ -1,5 +1,52 @@
 # Architecture Analysis (Methodology)
 
+## 0. Model components
+
+```
+Input face image
+      |
+      v
+Custom ResNet-18 backbone (manually implemented, block layout [2,2,2,2])
+      |
+      v
+Shared feature vector z (512-d)
+      |
+      +----------------------+----------------------+
+      |                                             |
+      v                                             v
+Age Adapter (residual bottleneck)          Gender Adapter (residual bottleneck)
+      |                                             |
+      v                                             v
+Age Quantile Head                          Gender Classification Head
+  -> q10, q50, q90                            -> probabilities, or "Not sure"
+```
+
+- **Backbone**: `src/models/custom_resnet.py` -- hand-written `BasicBlock`
+  residual blocks, manual downsampling (strided 1x1 conv + BN shortcuts),
+  stem conv + BN + ReLU + max-pool, adaptive average pooling, 512-d
+  embedding. **No `torchvision.models`, `timm`, Hugging Face vision
+  models, or downloaded pretrained checkpoints anywhere in this repo.**
+  The only way to initialize non-random weights is a checkpoint produced
+  by this repository (supervised training or the optional SimCLR-style
+  pretraining) or a compatible local file you explicitly point at.
+- **Adapters**: `src/models/adapters.py` -- `adapter_output = z + up(dropout(gelu(down(z))))`,
+  configurable bottleneck dimension (default 256), near-identity at
+  initialization (zero-initialized up-projection).
+- **Heads**: `src/models/heads.py` -- age quantile head (safe
+  `q50, q50 - softplus(.), q50 + softplus(.)` parameterization guaranteeing
+  `q10 <= q50 <= q90`) and a softmax gender classification head.
+- **Loss balancing**: `src/losses/multitask_loss.py` -- fixed weights or
+  learned homoscedastic-uncertainty weighting, with masked losses so a
+  task with no labels in a batch contributes nothing.
+- **Backbone selection**: config-driven (`model.backbone.name` in
+  `configs/model.yaml`) via `src/models/backbone_factory.py`. Default and
+  main research backbone is `custom_resnet18`; `simple_cnn`
+  (`src/models/simple_cnn.py`, a conventional non-residual CNN) and
+  `plain_deep18_no_skip` (`src/models/plain_deep18_no_skip.py`) exist
+  solely as controlled ablation baselines -- see `docs/experiment_plan.md`
+  and never the project's main backbone or the one used by the deployed
+  API.
+
 This document describes *how* this repository analyzes the shared-backbone
 / adapter / loss-balancing architecture questions, and how to read the
 generated numbers. It is a fixed methods reference; the actual numbers for

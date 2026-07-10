@@ -1,5 +1,30 @@
 # Reproducibility
 
+## Repository layout
+
+```
+configs/       YAML configuration (data, model, training, experiments, robustness, api)
+src/           Library code (data, models, losses, training, evaluation, inference, api, utils)
+scripts/       CLI entry points (one per pipeline stage)
+tests/         Pytest suite, including a synthetic-data smoke training test
+frontend/      React + TypeScript + Vite + Tailwind dashboard
+docs/          Architecture analysis, experiment plan, model/data cards, reproducibility
+data/          Local dataset (never committed); splits; not tracked by git
+checkpoints/   Trained model checkpoints (never committed)
+experiments/   Isolated per-experiment/seed run trees (checkpoints, calibration,
+               metrics, plots, robustness, knn) from run_seeds.py/run_experiments.py
+outputs/       Cross-run artifacts: architecture_analysis, backbone_comparison,
+               gradcam, reports, data_quality (single global outputs/calibration
+               or outputs/robustness are never used by the isolated pipeline above)
+```
+
+`experiments/<experiment>/seed_<seed>/{checkpoints,calibration,metrics,plots,robustness,knn}`
+(`src/utils/experiment_paths.py`) is the isolated artifact tree used by
+`scripts/run_experiments.py` and `scripts/run_seeds.py` -- every
+checkpoint gets calibrated and evaluated inside its own tree so two
+experiments or seeds can never silently collide or contaminate each
+other's calibration/robustness artifacts (see `docs/calibration.md`).
+
 ## Seeds
 
 Every script that trains, splits, evaluates, calibrates, or runs
@@ -78,7 +103,9 @@ values for your run are recorded by the trainer and reported in
 
 ## Running on Kaggle Notebooks / Google Colab
 
-Two ready-to-run notebooks implement the full pipeline described in this
+See `docs/notebooks.md` for the full guide (execution profiles, restart
+safety, multi-seed runs, rerunning analysis without retraining). Summary:
+two ready-to-run notebooks implement the full pipeline described in this
 document -- environment/GPU checks, repository setup, dependency
 installation, data validation and split preparation, automated tests, the
 controlled plain-CNN-vs-Custom-ResNet-18 comparison, calibration,
@@ -92,8 +119,7 @@ aggregation, and a final report + archive:
   attached Kaggle input dataset (or the Kaggle API), never mounts Google
   Drive, and produces a downloadable zip archive under Kaggle's Output tab.
 
-See the root `README.md`'s "Colab and Kaggle notebooks" section for which
-one to use. Both are pure orchestration around this repository's real
+See `docs/notebooks.md` for which one to use. Both are pure orchestration around this repository's real
 `scripts/*.py` -- they never reimplement model, dataset, training, or
 evaluation logic, use a readable generated run ID
 (`<date>_<time>_<profile>_seed<seed>`), never overwrite an existing run

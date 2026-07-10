@@ -61,6 +61,24 @@ not intended to be tuned into a competitive standalone architecture, and
 the plain CNN must never be described as this project's main backbone;
 `CustomResNet18` remains that throughout.
 
+```bash
+# Run only the plain CNN baseline
+python scripts/run_experiments.py --only exp_0_simple_cnn_shared_adapters_learned_balance
+
+# Run the controlled CNN-vs-ResNet comparison (Experiment 0 + Experiment D)
+python scripts/run_experiments.py --only exp_0_simple_cnn_shared_adapters_learned_balance,exp_d_shared_adapters_learned_balance
+
+# Regenerate the research report, including the
+# "Plain CNN vs Custom ResNet-18 Backbone Comparison" section
+python scripts/generate_architecture_report.py --checkpoint checkpoints/exp_d_shared_adapters_learned_balance_best_balanced_score.pt
+```
+
+All three backbones (`custom_resnet18 | simple_cnn | plain_deep18_no_skip`)
+expose the same `forward` / `forward_features` (`layer1`-`layer4`, for
+Grad-CAM compatibility) / `num_parameters` interface, so the rest of the
+pipeline (adapters, heads, trainer, evaluation, inference, Grad-CAM) is
+unmodified by which one is active.
+
 ## Experiment 0b -- Plain, depth/width-matched, no-skip-connection backbone (`exp_0b_plain_deep18_no_skip_shared_adapters_learned_balance`)
 
 The controlled residual-connections ablation Experiment 0 cannot provide
@@ -153,11 +171,30 @@ once adapters already address representational conflict.
 ## Experiment E -- Parametric vs. k-NN (`exp_e_parametric_vs_knn`)
 
 Not a separate training run: reuses Experiment D's (or the best-performing
-experiment's) checkpoint. `scripts/build_knn_index.py` extracts embeddings
-from the training split and fits a distance-weighted k-NN index;
-`scripts/evaluate.py --compare-knn` compares the parametric heads against
-k-NN prediction in the same embedding space on age MAE/RMSE/coverage/width,
-gender accuracy/abstention, and inference latency.
+experiment's) checkpoint.
+
+```bash
+make build-knn CHECKPOINT=checkpoints/<your_checkpoint>.pt
+make evaluate CHECKPOINT=checkpoints/<your_checkpoint>.pt
+```
+
+`scripts/build_knn_index.py` extracts L2-normalized embeddings from the
+training split (`src/evaluation/knn_baseline.py`, backed by
+`sklearn.neighbors.NearestNeighbors`), fits a distance-weighted k-NN index
+(default k=15) separately for the age and gender-label embedding spaces,
+and saves it to `outputs/knn/knn_baseline.pkl`. `make evaluate` always
+passes `--compare-knn` (`scripts/evaluate.py --checkpoint ... --compare-knn`),
+which compares the parametric heads against k-NN prediction in the same
+embedding space on age MAE/RMSE/coverage/width, gender-label selective
+accuracy/abstention, and inference latency, writing
+`{output_dir}/knn/{output_name}_parametric_vs_knn.csv` -- isolated per
+checkpoint/experiment under that checkpoint's own configured output
+directory, never a single shared global path, so evaluating multiple
+checkpoints with `--compare-knn` never overwrites another experiment's
+comparison table. The saved metrics JSON also records this exact path
+under `knn_comparison_table_path`, so downstream code never has to guess
+it. See `docs/evaluation.md` for the metric definitions used in that
+comparison.
 
 ## Experiment F -- Pretrained vs. scratch (`exp_f_pretrained_vs_scratch`, optional)
 
