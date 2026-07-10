@@ -201,4 +201,8 @@ checkpoints at once:
 `docs/architecture_analysis_generated.md` fills in each section above with
 real numbers from your `outputs/` directory, or an explicit "not yet
 generated" placeholder (with the command to produce it) if you haven't run
-that stage yet. It never contains fabricated numbers.
+that stage yet. It never contains fabricated numbers. If you've re-run only
+some pipeline stages (e.g. just `make robustness`) and want the report
+re-rendered from whatever is already in `outputs/` without recomputing
+gradient interference / CKA, use `make export-report`
+(`scripts/export_report.py`) instead of the full `make architecture-report`.

@@ -107,8 +107,8 @@ dataset split -- see [Reproducibility and scope](#reproducibility-and-scope).
 ## Quick start
 
 ```bash
-git clone <this-repo>
-cd face-multitask-research
+git clone https://github.com/adischwartz15/AgeGender.git
+cd AgeGender
 make install
 cp .env.example .env              # fill in Kaggle credentials (see docs/data_card.md)
 make download-data
@@ -136,10 +136,14 @@ make gradcam CHECKPOINT=<checkpoint>.pt     # Grad-CAM heatmaps
 make demo                                   # launch API + frontend together
 ```
 
-Every command accepts `--set key.path=value` overrides (e.g.
+`prepare-data`, `pretrain`, `train`, and `experiments` accept
+`--set key.path=value` config overrides via `ARGS` (e.g.
 `make train ARGS="--set model.architecture=shared_no_adapters"`) instead
-of editing YAML in place. See [Documentation](#documentation) below for
-the guide covering each stage.
+of editing YAML in place. The evaluation-side commands (`calibrate`,
+`build-knn`, `evaluate`, `robustness`, `gradcam`, `compare-backbones`,
+`run-seeds`) take explicit flags instead (`CHECKPOINT=`, `EXPERIMENT=`,
+`SEEDS=`, etc. -- see each script's `--help`), not `--set`. See
+[Documentation](#documentation) below for the guide covering each stage.
 
 ## Demo and API
 
