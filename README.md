@@ -55,27 +55,17 @@ run actually found.
 
 ## Architecture
 
-```
-Input face image
-    |
-    v
-Custom ResNet-18 backbone (manually implemented)
-    |
-    v
-Shared 512-dimensional embedding
-    |
-    +-- Age Adapter -------- Age Quantile Head -------- q10, q50, q90
-    |
-    +-- Gender Adapter ----- Classification Head ------- probabilities / "Not sure"
-```
+![Multi-task model architecture](docs/assets/multitask_architecture.svg)
 
-A single hand-written ResNet-18 backbone feeds two residual bottleneck
-adapters, one per task, which in turn feed the age quantile head and the
-gender classification head. Two controlled baseline backbones
+The shared backbone extracts a 512-dimensional representation. Each task
+then modifies that representation through its own residual bottleneck
+adapter before its task-specific head. Two controlled baseline backbones
 (`simple_cnn`, `plain_deep18_no_skip`) also exist purely to isolate what
-the residual design contributes -- neither is used by the deployed model.
-See [docs/architecture_analysis.md](docs/architecture_analysis.md) for
-the full module-by-module design and analysis methodology.
+the residual design contributes -- neither is used by the deployed model;
+see [docs/model_visualizations.md](docs/model_visualizations.md) for the
+backbone-comparison diagram and detailed computational graphs, and
+[docs/architecture_analysis.md](docs/architecture_analysis.md) for the
+full module-by-module design and analysis methodology.
 
 ## Headline results
 
@@ -156,6 +146,14 @@ no face is detected, the API declines to predict rather than guessing.
 See [docs/api.md](docs/api.md) for the full endpoint table and example
 requests/responses.
 
+![Example model output](docs/assets/model_output_example.png)
+
+A real run of the repository's `Predictor` on a committed synthetic demo
+image, using the same checkpoint the API defaults to. The classical face
+detector finds no face in this cartoon-style image, so the honest,
+reproducible outcome is a decline to predict, not a fabricated number --
+see [docs/model_visualizations.md](docs/model_visualizations.md#example-prediction-output).
+
 ## Repository structure
 
 ```
@@ -175,6 +173,7 @@ artifacts and are never committed -- see
 ## Documentation
 
 - [Architecture and model design](docs/architecture_analysis.md)
+- [Model visualizations](docs/model_visualizations.md)
 - [Experiment plan (Experiments 0/0b/0c, A-F)](docs/experiment_plan.md)
 - [Final evaluation protocol (pre-registered)](docs/final_evaluation_protocol.md)
 - [Headline results (full numbers)](docs/results.md)

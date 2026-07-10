@@ -1,0 +1,14 @@
+# Optional dependencies for scripts/generate_model_visualizations.py only.
+# Not required for training, evaluation, the API, or the frontend -- kept
+# out of requirements.txt so the core install stays lightweight.
+#
+# Also requires the Graphviz *system* executable ("dot") to be installed
+# and on PATH (e.g. `apt install graphviz`, `brew install graphviz`, or
+# https://graphviz.org/download/ on Windows) -- the Python packages below
+# only bind to it, they do not bundle it.
+#
+# Install with:
+#   pip install -r requirements-visualization.txt
+
+graphviz>=0.20,<1.0
+torchview>=0.2.6,<0.3

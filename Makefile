@@ -1,7 +1,7 @@
 .PHONY: install test download-data prepare-data pretrain train experiments \
         calibrate build-knn evaluate robustness gradcam architecture-report \
         run-seeds final-report demo-images demo-readiness demo compare-backbones \
-        api frontend
+        api frontend model-visualizations
 
 PYTHON ?= python
 CHECKPOINT ?= checkpoints/multitask_best_balanced_score.pt
@@ -63,6 +63,14 @@ compare-backbones:
 
 demo-images:
 	$(PYTHON) scripts/generate_demo_images.py
+
+# Regenerates every diagram under docs/assets/ (architecture, backbone
+# comparison, detailed computational graphs, prediction-output example) --
+# see docs/model_visualizations.md. Requires
+# `pip install -r requirements-visualization.txt` and the Graphviz system
+# executable ("dot") on PATH.
+model-visualizations:
+	$(PYTHON) scripts/generate_model_visualizations.py --output-dir docs/assets
 
 demo-readiness:
 	$(PYTHON) scripts/check_demo_readiness.py

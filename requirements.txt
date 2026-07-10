@@ -14,3 +14,6 @@ python-multipart>=0.0.9
 kaggle>=1.6
 pytest>=8.0
 httpx>=0.27
+
+# Optional, only for scripts/generate_model_visualizations.py:
+# pip install -r requirements-visualization.txt
