@@ -83,8 +83,10 @@ def test_detect_largest_face_falls_through_to_later_attempts(monkeypatch):
 
     def fake_get_cascade(filename):
         calls.append(filename)
-        # Only the third configured attempt (index 2) "finds" a face.
-        if len(calls) < 3:
+        if filename == "haarcascade_eye.xml":
+            return _FakeCascade([(1, 1, 5, 5)])  # eye check always passes
+        # Only the third configured face attempt "finds" a face.
+        if len([c for c in calls if c != "haarcascade_eye.xml"]) < 3:
             return _FakeCascade([])
         return _FakeCascade([(10, 10, 50, 50)])
 
@@ -92,7 +94,8 @@ def test_detect_largest_face_falls_through_to_later_attempts(monkeypatch):
     box = face_detection.detect_largest_face(_solid_color_image())
 
     assert box == (10, 10, 50, 50)
-    assert len(calls) == 3  # tried all three configured attempts before succeeding on the last
+    face_calls = [c for c in calls if c != "haarcascade_eye.xml"]
+    assert len(face_calls) == 3  # tried all three configured attempts before succeeding on the last
 
 
 def test_detect_largest_face_stops_at_first_successful_attempt(monkeypatch):
@@ -100,13 +103,14 @@ def test_detect_largest_face_stops_at_first_successful_attempt(monkeypatch):
 
     def fake_get_cascade(filename):
         calls.append(filename)
-        return _FakeCascade([(5, 5, 20, 20)])
+        return _FakeCascade([(5, 5, 20, 20)])  # both face and eye checks "find" a box
 
     monkeypatch.setattr(face_detection, "_get_cascade", fake_get_cascade)
     box = face_detection.detect_largest_face(_solid_color_image())
 
     assert box == (5, 5, 20, 20)
-    assert len(calls) == 1  # did not try further attempts once the first one succeeded
+    face_calls = [c for c in calls if c != "haarcascade_eye.xml"]
+    assert len(face_calls) == 1  # did not try further attempts once the first one succeeded
 
 
 def test_detect_largest_face_picks_largest_box_when_multiple_found(monkeypatch):
@@ -116,3 +120,20 @@ def test_detect_largest_face_picks_largest_box_when_multiple_found(monkeypatch):
     )
     box = face_detection.detect_largest_face(_solid_color_image())
     assert box == (20, 20, 60, 60)
+
+
+def test_detect_largest_face_rejects_candidate_without_eyes(monkeypatch):
+    """A face-cascade hit that has no detectable eyes (e.g. an animal-face false
+    positive) is rejected rather than accepted, falling through remaining attempts."""
+    calls = []
+
+    def fake_get_cascade(filename):
+        calls.append(filename)
+        if filename == "haarcascade_eye.xml":
+            return _FakeCascade([])  # eyes never found
+        return _FakeCascade([(10, 10, 50, 50)])  # every face attempt "succeeds"
+
+    monkeypatch.setattr(face_detection, "_get_cascade", fake_get_cascade)
+    box = face_detection.detect_largest_face(_solid_color_image())
+
+    assert box is None

@@ -5,7 +5,7 @@ api:
   port: 8000
   cors_origins: ["http://localhost:5173", "http://127.0.0.1:5173"]
   model_version: "v1"
-  active_checkpoint: ./checkpoints/multitask_best_balanced_score.pt
+  active_checkpoint: ./checkpoints/exp_d_shared_adapters_learned_balance_best_balanced_score.pt
   # Optional display-name override for the two dataset gender-label
   # classes, independent of whatever was baked into the checkpoint's
   # training-time config -- e.g. ["male", "female"] if your dataset's own

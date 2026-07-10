@@ -67,12 +67,33 @@ def _get_cascade(filename: str) -> cv2.CascadeClassifier:
     return _cascade_cache[filename]
 
 
+def _has_eyes(face_region: np.ndarray) -> bool:
+    """Return True if at least one eye is detected inside a candidate face region.
+
+    The frontal-face cascade alone false-positives on non-human textures
+    that happen to have face-like structure (most commonly animal faces --
+    e.g. a dog or cat portrait). Requiring a corroborating eye detection
+    inside the candidate box is the standard classical mitigation: eyes
+    are a much more specific pattern that these false positives generally
+    lack, so this rejects most of them without needing a neural detector.
+    """
+    if face_region.size == 0:
+        return False
+    eye_cascade = _get_cascade("haarcascade_eye.xml")
+    min_size = max(10, int(min(face_region.shape[:2]) * 0.12))
+    eyes = eye_cascade.detectMultiScale(
+        face_region, scaleFactor=1.1, minNeighbors=5, minSize=(min_size, min_size)
+    )
+    return len(eyes) > 0
+
+
 def detect_largest_face(image: Image.Image) -> tuple[int, int, int, int] | None:
     """Return ``(x, y, w, h)`` of the largest detected face, or None if none found.
 
-    Tries each entry in ``_DETECTION_ATTEMPTS`` in order and returns on the
-    first one that finds anything, rather than only ever trying a single
-    strict configuration.
+    Tries each entry in ``_DETECTION_ATTEMPTS`` in order. A candidate box
+    must also pass ``_has_eyes`` before being accepted; if it doesn't,
+    detection falls through to the next (more lenient) attempt rather
+    than accepting the false positive.
     """
     gray = np.asarray(image.convert("L"))
     gray = cv2.equalizeHist(gray)  # improves detection robustness under uneven lighting
@@ -84,7 +105,8 @@ def detect_largest_face(image: Image.Image) -> tuple[int, int, int, int] | None:
         )
         if len(faces) > 0:
             x, y, w, h = max(faces, key=lambda box: box[2] * box[3])
-            return int(x), int(y), int(w), int(h)
+            if _has_eyes(gray[y : y + h, x : x + w]):
+                return int(x), int(y), int(w), int(h)
     return None
 
 
