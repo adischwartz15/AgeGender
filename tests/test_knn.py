@@ -42,6 +42,25 @@ def test_knn_age_prediction_close_to_neighbor_ages():
     assert result.q10[0] <= result.q50[0] <= result.q90[0]
 
 
+def test_knn_age_prediction_never_widens_past_age_bounds():
+    """The interval-widening step (mean - std*widen_factor) is not bounded by the
+    observed neighbor ages, so young/high-variance/far-away queries could
+    previously produce a negative q10. It must be clamped to [age_min, age_max]."""
+    rng = np.random.default_rng(3)
+    n = 200
+    embeddings = rng.normal(loc=0.0, scale=1.0, size=(n, 8))
+    ages = np.clip(rng.normal(loc=4.0, scale=4.0, size=n), 0, 120)
+    genders = rng.integers(0, 2, n).astype(float)
+    mask = np.ones(n, dtype=bool)
+
+    knn = KNNEmbeddingBaseline(k=15, age_min=0.0, age_max=120.0).fit(embeddings, ages, mask, genders, mask)
+    query = rng.normal(size=(20, 8)) * 3  # far from training distribution -> large widen_factor
+    result = knn.predict_age(query)
+
+    assert result.q10.min() >= 0.0
+    assert result.q90.max() <= 120.0
+
+
 def test_knn_gender_prediction_class_probabilities_sum_to_one():
     rng = np.random.default_rng(1)
     n = 100

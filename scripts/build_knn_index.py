@@ -71,14 +71,21 @@ def main() -> int:
     # index per task using its own adapter's embedding.
     knn_cfg = config["knn"]
     k = args.k or knn_cfg.get("k", 15)
-    age_knn = KNNEmbeddingBaseline(k=k, distance_weighted=knn_cfg.get("distance_weighted", True), metric=knn_cfg.get("metric", "euclidean"))
+    age_head_cfg = config["model"]["age_head"]
+    knn_kwargs = dict(
+        distance_weighted=knn_cfg.get("distance_weighted", True),
+        metric=knn_cfg.get("metric", "euclidean"),
+        age_min=age_head_cfg.get("age_min", 0.0),
+        age_max=age_head_cfg.get("age_max", 120.0),
+    )
+    age_knn = KNNEmbeddingBaseline(k=k, **knn_kwargs)
     age_knn.fit(age_embeds, ages, age_mask, genders, np.zeros_like(gender_mask), num_classes=config["model"]["gender_head"]["num_classes"])
 
-    gender_knn = KNNEmbeddingBaseline(k=k, distance_weighted=knn_cfg.get("distance_weighted", True), metric=knn_cfg.get("metric", "euclidean"))
+    gender_knn = KNNEmbeddingBaseline(k=k, **knn_kwargs)
     gender_knn.fit(gender_embeds, ages, np.zeros_like(age_mask), genders, gender_mask, num_classes=config["model"]["gender_head"]["num_classes"])
 
     # Merge into a single baseline object exposing both task indices.
-    combined = KNNEmbeddingBaseline(k=k, distance_weighted=knn_cfg.get("distance_weighted", True), metric=knn_cfg.get("metric", "euclidean"))
+    combined = KNNEmbeddingBaseline(k=k, **knn_kwargs)
     combined.age_index = age_knn.age_index
     combined.age_values = age_knn.age_values
     combined.age_distance_scale = age_knn.age_distance_scale

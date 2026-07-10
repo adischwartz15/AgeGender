@@ -61,10 +61,19 @@ class KNNGenderResult:
 class KNNEmbeddingBaseline:
     """A fitted k-NN index plus the labels needed for age and gender prediction."""
 
-    def __init__(self, k: int = 15, distance_weighted: bool = True, metric: str = "euclidean") -> None:
+    def __init__(
+        self,
+        k: int = 15,
+        distance_weighted: bool = True,
+        metric: str = "euclidean",
+        age_min: float = 0.0,
+        age_max: float = 120.0,
+    ) -> None:
         self.k = k
         self.distance_weighted = distance_weighted
         self.metric = metric
+        self.age_min = age_min
+        self.age_max = age_max
         self.age_index: NearestNeighbors | None = None
         self.gender_index: NearestNeighbors | None = None
         self.age_values: np.ndarray | None = None
@@ -126,8 +135,10 @@ class KNNEmbeddingBaseline:
 
             mean_distance = float(row_dist.mean())
             widen_factor = 1.0 + mean_distance / self.age_distance_scale
-            widened_q10 = min(q10, mean - std * widen_factor)
-            widened_q90 = max(q90, mean + std * widen_factor)
+            age_min = getattr(self, "age_min", 0.0)
+            age_max = getattr(self, "age_max", 120.0)
+            widened_q10 = np.clip(min(q10, mean - std * widen_factor), age_min, age_max)
+            widened_q90 = np.clip(max(q90, mean + std * widen_factor), age_min, age_max)
 
             q10s.append(widened_q10)
             q50s.append(q50)
