@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import torch.nn as nn
+
 from src.evaluation.calibration import load_calibration
 from src.evaluation.knn_baseline import KNNEmbeddingBaseline
 from src.models.multitask_model import MultiTaskFaceModel
@@ -30,11 +32,27 @@ class LoadedArtifacts:
     warnings: list[str] = field(default_factory=list)
 
 
-def load_model_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> tuple[MultiTaskFaceModel, dict, dict]:
-    """Load a MultiTaskFaceModel from a checkpoint produced by this repository's trainer."""
+def load_model_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> tuple[nn.Module, dict, dict]:
+    """Load a model from a checkpoint produced by this repository's trainer.
+
+    ``config["model"]["family"]`` selects the model class to reconstruct:
+    ``"core"`` (the default -- every existing checkpoint/config lacks this
+    key, so it always resolves to the original ``MultiTaskFaceModel`` path
+    unchanged) or ``"pretrained_volo"`` (the supplementary transfer-learning
+    extension's ``PretrainedVOLOFaceOnlyMultiTask``, see
+    ``src/models/pretrained_volo.py``).
+    """
     checkpoint = load_checkpoint(checkpoint_path, map_location=device)
     config = checkpoint["config"]
-    model = MultiTaskFaceModel(config)
+    family = config["model"].get("family", "core")
+    if family == "pretrained_volo":
+        from src.models.pretrained_volo import build_pretrained_volo_model
+
+        model = build_pretrained_volo_model(config)
+    elif family == "core":
+        model = MultiTaskFaceModel(config)
+    else:
+        raise ValueError(f"Unknown model.family '{family}', expected 'core' or 'pretrained_volo'")
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
     model.eval()

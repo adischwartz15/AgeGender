@@ -1,0 +1,106 @@
+# Supplementary experiment config: ImageNet-pretrained VOLO-D1 (face-only)
+# transfer-learning extension (Table B). NOT part of the core from-scratch
+# architecture ablation suite in configs/experiments.yaml -- merged on top
+# of default+data+model+training the same way an experiment override is,
+# but lives in its own file and is only loaded by
+# scripts/run_transfer_learning.py. Never merged into configs/experiments.yaml,
+# never loaded by scripts/run_experiments.py, and never part of the default
+# profile -- see README.md "Core vs. supplementary experiments".
+
+model:
+  # Dispatches src/inference/artifacts.py::load_model_checkpoint to build a
+  # PretrainedVOLOFaceOnlyMultiTask instead of the default MultiTaskFaceModel.
+  family: pretrained_volo
+  volo:
+    model_id: volo_d1_224
+    pretrained: true
+    # Must be present in src/models/pretrained_volo.py::ALLOWED_PRETRAINED_SOURCES
+    # (ImageNet only -- never a MiVOLO or UTKFace-trained source).
+    pretrained_source: imagenet1k
+  adapters:
+    enabled: true
+    # Same ~4:1 bottleneck ratio as the from-scratch adapters' 512->128
+    # default (src/models/adapters.py::BottleneckAdapter's own constructor
+    # default). bottleneck_dim is NOT hardcoded here -- PretrainedVOLOFaceOnlyMultiTask
+    # computes it as round(discovered_embedding_dim / bottleneck_ratio)
+    # (~96 for VOLO-D1's 384-d embedding; the embedding_dim itself is
+    # discovered programmatically at model-construction time, never assumed).
+    bottleneck_ratio: 4
+    dropout: 0.2
+  age_head:
+    hidden_dim: 128
+    dropout: 0.2
+    age_min: 0
+    age_max: 120
+  gender_head:
+    hidden_dim: 128
+    dropout: 0.2
+    num_classes: 2
+    class_names: ["gender_label_0", "gender_label_1"]
+    confidence_threshold: 0.80
+    class_weights: null
+  loss_balancing:
+    # Reuses src/losses/multitask_loss.py unmodified.
+    mode: learned_uncertainty
+    learned_uncertainty:
+      init_log_var_age: 0.0
+      init_log_var_gender: 0.0
+      warmup_epochs: 1
+
+training:
+  # Conservative default -- VOLO-D1 @ 224px is far heavier than the
+  # from-scratch 128px models and will OOM on a free-tier Colab GPU at the
+  # from-scratch batch size (64). Raise cautiously if GPU memory allows.
+  batch_size: 16
+  grad_accumulation_steps: 2   # effective batch size 32
+  num_workers: 2
+  weight_decay: 0.05
+  grad_clip_norm: 1.0
+  mixed_precision: true        # AMP, CUDA-only -- auto-disabled on CPU (see TransferTrainer)
+  seed: 42
+  early_stopping_patience: 12
+  head_only_epochs: 3          # Stage 1: frozen backbone, adapters/heads/balancing only
+  finetune_epochs: 20          # Stage 2 ceiling; early stopping (validation only) still applies
+  finetune_unfreeze: full      # "full" or {last_n_stages: N}
+  head_lr: 3.0e-4
+  adapter_lr: 3.0e-4
+  loss_balance_lr: 3.0e-4
+  backbone_lr: 3.0e-5
+  scheduler:
+    warmup_epochs: 1
+
+paths:
+  checkpoint_dir: ./checkpoints/transfer_learning/volo_d1_face_only_pretrained
+  output_dir: ./results/transfer_learning/volo_d1_face_only_pretrained
+
+# transfer_learning_extension run profile: the only two models compared in
+# Table B. Reuses exp_d_shared_adapters_learned_balance's already-trained
+# result (never retrains it) as the from-scratch baseline row.
+transfer_learning:
+  experiment_name: volo_d1_face_only_pretrained
+  baseline_experiment: exp_d_shared_adapters_learned_balance
+  seeds: [42, 43, 44]
+
+# transfer_learning_smoke: tiny, non-scientific config for a fast CPU
+# integration check -- a couple of synthetic-sized batches, one short epoch
+# per stage, pretrained=false (no network access). Applied as an override
+# on top of everything above when scripts/run_transfer_learning.py is
+# called with --smoke. Any metrics produced under this profile must be
+# labelled non-scientific, never reported in Table B.
+transfer_learning_smoke:
+  model:
+    volo:
+      pretrained: false
+  training:
+    batch_size: 2
+    grad_accumulation_steps: 1
+    num_workers: 0
+    mixed_precision: false
+    head_only_epochs: 1
+    finetune_epochs: 1
+    early_stopping_patience: 100
+    max_train_batches_per_epoch: 2
+    max_val_batches_per_epoch: 2
+  paths:
+    checkpoint_dir: ./checkpoints/transfer_learning/_smoke
+    output_dir: ./results/transfer_learning/_smoke

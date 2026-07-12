@@ -44,6 +44,22 @@ def age_absolute_errors(y_true: np.ndarray, y_pred: np.ndarray) -> np.ndarray:
     return np.abs(y_true - y_pred)
 
 
+def age_median_absolute_error(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Median absolute age error (years) -- robust to the heavy tail age_mae is sensitive to."""
+    return float(np.median(age_absolute_errors(y_true, y_pred)))
+
+
+def age_cumulative_score(y_true: np.ndarray, y_pred: np.ndarray, threshold: float = 5.0) -> float:
+    """CS@threshold: fraction of samples with absolute age error <= ``threshold`` years.
+
+    Standard age-estimation literature metric (e.g. CS@5), complementing
+    MAE/RMSE with "how often are we close enough" rather than an average
+    magnitude of error.
+    """
+    errors = age_absolute_errors(y_true, y_pred)
+    return float(np.mean(errors <= threshold))
+
+
 def age_error_percentiles(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
     """Median / 90th / 95th percentile of absolute age error.
 
@@ -53,7 +69,7 @@ def age_error_percentiles(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, f
     """
     errors = age_absolute_errors(y_true, y_pred)
     return {
-        "median": float(np.median(errors)),
+        "median": age_median_absolute_error(y_true, y_pred),
         "p90": float(np.percentile(errors, 90)),
         "p95": float(np.percentile(errors, 95)),
     }
@@ -167,6 +183,46 @@ def confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, num_classes: int = 
     for t, p in zip(y_true, y_pred):
         matrix[int(t), int(p)] += 1
     return matrix
+
+
+def gender_balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """Mean of per-class recall -- unlike raw accuracy, insensitive to class imbalance."""
+    from sklearn.metrics import balanced_accuracy_score
+
+    return float(balanced_accuracy_score(y_true, y_pred))
+
+
+def gender_precision_recall_f1(
+    y_true: np.ndarray, y_pred: np.ndarray, average: str = "binary", pos_label: int = 1,
+) -> dict[str, float]:
+    """Precision/recall/F1 for the gender-label head.
+
+    ``average="binary"`` (default) scores the ``pos_label`` class only,
+    matching how a 2-class dataset gender-label head is normally read.
+    ``zero_division=0`` avoids a warning/exception when a class is entirely
+    absent or entirely unpredicted (e.g. a tiny smoke-test split).
+    """
+    from sklearn.metrics import precision_recall_fscore_support
+
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_pred, average=average, pos_label=pos_label, zero_division=0,
+    )
+    return {"precision": float(precision), "recall": float(recall), "f1": float(f1)}
+
+
+def gender_roc_auc(y_true: np.ndarray, positive_class_probs: np.ndarray) -> float | None:
+    """ROC-AUC for the positive-class probability.
+
+    Returns ``None`` (never a fabricated value, and never a swallowed
+    exception) when ``y_true`` contains only one class -- AUC is
+    mathematically undefined there, which is an expected condition on tiny
+    smoke-test splits, not a bug to hide behind a broad except.
+    """
+    from sklearn.metrics import roc_auc_score
+
+    if len(np.unique(y_true)) < 2:
+        return None
+    return float(roc_auc_score(y_true, positive_class_probs))
 
 
 def confidence_statistics(confidences: np.ndarray) -> dict[str, float]:

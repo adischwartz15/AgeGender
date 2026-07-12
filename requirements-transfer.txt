@@ -1,0 +1,8 @@
+# Optional extra for the supplementary ImageNet-pretrained transfer-learning
+# experiment only (src/models/pretrained_volo.py, scripts/run_transfer_learning.py).
+# Not required to install, import, or run any core (from-scratch) experiment --
+# see README.md "Core vs. supplementary" section.
+#
+#     pip install -r requirements.txt
+#     pip install -r requirements-transfer.txt   # only if you want to run the VOLO extension
+timm>=1.0,<2.0
