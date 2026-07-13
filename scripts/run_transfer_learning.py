@@ -49,8 +49,6 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import platform
-import subprocess
 import sys
 from pathlib import Path
 
@@ -65,6 +63,7 @@ from src.training.persistent_artifacts import (  # noqa: E402
 )
 from src.utils.config import CONFIG_DIR, REPO_ROOT, _deep_merge, _load_yaml, load_config  # noqa: E402
 from src.utils.experiment_paths import experiment_paths  # noqa: E402
+from src.utils.provenance import dependency_versions, git_commit_sha  # noqa: E402
 from src.utils.io import file_sha256, save_json  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
 from src.utils.seed import set_global_seed
@@ -142,30 +141,6 @@ def load_transfer_learning_config(seed: int, smoke: bool = False, overrides: dic
     return merged
 
 
-def _dependency_versions() -> dict:
-    import torch
-
-    versions = {
-        "python": platform.python_version(),
-        "torch": torch.__version__,
-        "cuda": torch.version.cuda,
-    }
-    try:
-        import timm
-
-        versions["timm"] = timm.__version__
-    except ImportError:
-        versions["timm"] = None
-    return versions
-
-
-def _git_commit_sha() -> str | None:
-    try:
-        return subprocess.check_output(
-            ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, stderr=subprocess.DEVNULL,
-        ).decode().strip()
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        return None
 
 
 def train_and_evaluate_volo_smoke() -> dict | None:
@@ -244,7 +219,7 @@ def run_volo_seed(seed: int, args: argparse.Namespace) -> dict | None:
     model_id = config["model"]["volo"]["model_id"]
     pretrained_source = config["model"]["volo"]["pretrained_source"]
     split_sha256 = _split_sha256()
-    git_sha = _git_commit_sha()
+    git_sha = git_commit_sha()
 
     manager = PersistentArtifactManager(
         VOLO_EXPERIMENT_NAME, seed, local_root=_local_root(args.storage_root),
@@ -545,8 +520,8 @@ def main() -> int:
         "missing_volo_seeds": missing_volo_seeds,
         "missing_baseline_seeds": missing_baseline_seeds,
         "single_seed_no_variance_estimate": len(volo_metrics_per_seed) < 2 or len(baseline_metrics_per_seed) < 2,
-        "git_commit_sha": _git_commit_sha(),
-        "dependency_versions": _dependency_versions(),
+        "git_commit_sha": git_commit_sha(),
+        "dependency_versions": dependency_versions(),
         "split_sha256": file_sha256(split_path) if split_path.exists() else None,
         "smoke": args.smoke,
         "artifact_root": str(_local_root(args.storage_root)),

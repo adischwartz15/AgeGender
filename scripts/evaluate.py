@@ -36,10 +36,12 @@ from src.evaluation.metrics import (
     gender_precision_recall_f1, gender_roc_auc, interval_coverage, mean_interval_width,
     median_interval_width, select_interval_examples,
 )
+from src.evaluation.predictions import export_predictions
 from src.inference.artifacts import load_model_checkpoint
 from src.utils.config import REPO_ROOT, resolve_device
-from src.utils.io import checkpoint_experiment_name, save_json
+from src.utils.io import checkpoint_experiment_name, file_sha256, save_json
 from src.utils.logging import get_logger
+from src.utils.provenance import dependency_versions, git_commit_sha
 from src.utils.visualization import (
     plot_age_scatter, plot_confusion_matrix, plot_coverage_width_tradeoff, plot_error_histogram,
     plot_interval_coverage, plot_interval_width_by_bucket,
@@ -199,8 +201,42 @@ def evaluate_checkpoint(
 
     output_dir = REPO_ROOT / config["paths"]["output_dir"]
     metrics_dir, plots_dir = output_dir / "metrics", output_dir / "plots"
+    predictions_dir = output_dir / "predictions"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-sample prediction export: the EXACT same `preds` arrays already
+    # used for the aggregate metrics above -- never a second inference pass
+    # -- so a later re-analysis or paired statistical comparison never needs
+    # to re-run the model, and the exported file is guaranteed to reproduce
+    # the reported numbers (see tests/test_predictions_export.py).
+    export_predictions(
+        preds, predictions_dir / f"{output_name}_predictions.csv", split="test", calibration=calibration,
+        confidence_threshold=confidence_threshold,
+        manifest_path=predictions_dir / f"{output_name}_predictions_manifest.json",
+        provenance={
+            "experiment": checkpoint_experiment_name(checkpoint_path),
+            "checkpoint_path": str(checkpoint_path),
+            "checkpoint_sha256": file_sha256(checkpoint_path),
+            "split_path": str(splits_path),
+            "split_sha256": file_sha256(splits_path),
+            "calibration_artifact_sha256": (
+                file_sha256(Path(calibration_dir) / "conformal_calibration.json")
+                if calibration is not None and calibration_dir else None
+            ),
+            "model_family": config["model"].get("family", "core"),
+            "backbone_identifier": getattr(model, "model_id", config["model"].get("backbone", {}).get("name")),
+            "pretrained_source": getattr(model, "pretrained_source", None),
+            "input_size": getattr(model, "input_size", config["dataset"]["image_size"]),
+            "preprocessing": {
+                "image_size": eval_transform.image_size, "mean": list(eval_transform.mean),
+                "std": list(eval_transform.std), "interpolation": eval_transform.interpolation,
+                "crop_pct": getattr(eval_transform, "crop_pct", 1.0),
+            },
+            "git_commit_sha": git_commit_sha(),
+            "dependency_versions": dependency_versions(),
+        },
+    )
 
     age_mask = preds["age_mask"].astype(bool)
     if age_mask.any():
