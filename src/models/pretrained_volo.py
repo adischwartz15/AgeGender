@@ -214,6 +214,13 @@ class PretrainedVOLOFaceOnlyMultiTask(nn.Module):
             )
         self.input_size: int = self.data_config["input_size"][-1]
         self.interpolation_name: str = self.data_config.get("interpolation", "bicubic")
+        # crop_pct < 1.0 means this backbone was trained/validated with the
+        # standard ImageNet "resize larger, then center-crop" protocol (the
+        # intermediate resize target is round(input_size / crop_pct), not
+        # input_size itself) -- see EvalTransform/resize_and_center_crop.
+        # Defaults to 1.0 (no separate crop stage) if timm's resolved config
+        # doesn't specify one.
+        self.crop_pct: float = float(self.data_config.get("crop_pct") or 1.0)
 
         self.embedding_dim = self._discover_and_verify_embedding_dim(timm)
 
@@ -476,15 +483,22 @@ class PretrainedVOLOFaceOnlyMultiTask(nn.Module):
 
     def build_transforms(self):
         """Build (TrainTransform, EvalTransform) using this backbone's own resolved
-        input size/mean/std/interpolation -- never this project's 128px/existing
-        normalization defaults (those stay exactly as-is for every core experiment)."""
+        input size/mean/std/interpolation/crop_pct -- never this project's
+        128px/existing normalization defaults (those stay exactly as-is for
+        every core experiment). See ``src/data/transforms.py::resolve_eval_transform``,
+        the single place every evaluation/calibration/robustness/prediction-export
+        path resolves this from."""
         from src.data.transforms import EvalTransform, TrainTransform
 
         interpolation = _INTERPOLATION_NAME_TO_PIL.get(self.interpolation_name, 3)
         mean = tuple(self.data_config["mean"])
         std = tuple(self.data_config["std"])
-        train_transform = TrainTransform(self.input_size, mean=mean, std=std, interpolation=interpolation)
-        eval_transform = EvalTransform(self.input_size, mean=mean, std=std, interpolation=interpolation)
+        train_transform = TrainTransform(
+            self.input_size, mean=mean, std=std, interpolation=interpolation, crop_pct=self.crop_pct,
+        )
+        eval_transform = EvalTransform(
+            self.input_size, mean=mean, std=std, interpolation=interpolation, crop_pct=self.crop_pct,
+        )
         return train_transform, eval_transform
 
 

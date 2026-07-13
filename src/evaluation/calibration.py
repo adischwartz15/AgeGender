@@ -65,6 +65,22 @@ def apply_conformal_offset(q10: np.ndarray, q90: np.ndarray, offset: float) -> t
     return q10 - offset, q90 + offset
 
 
+def compute_preprocessing_fingerprint(
+    input_size: int, mean: Sequence[float], std: Sequence[float], interpolation, crop_pct: float = 1.0,
+) -> str:
+    """SHA-256 fingerprint of the exact preprocessing a checkpoint's
+    predictions were produced with -- input size, normalization mean/std,
+    interpolation mode, and crop_pct. Recorded on a calibration artifact so
+    a later mismatch (e.g. applying a calibration fit under one crop_pct to
+    predictions produced under a different one) is caught explicitly,
+    in addition to (not instead of) the checkpoint-hash check, which
+    already implies this for any checkpoint this repository trained but is
+    otherwise opaque to inspect.
+    """
+    payload = f"{input_size}|{list(mean)}|{list(std)}|{interpolation}|{crop_pct}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def fit_and_save_calibration(
     y_true_val: np.ndarray,
     q10_val: np.ndarray,
@@ -77,18 +93,24 @@ def fit_and_save_calibration(
     test_sample_ids: Sequence | None = None,
     experiment: str | None = None,
     seed: int | None = None,
+    model_id: str | None = None,
+    pretrained_source: str | None = None,
+    preprocessing_fingerprint: str | None = None,
 ) -> dict:
     """Fit conformal calibration on the validation set and save the artifact.
 
     ``checkpoint_path`` / ``split_csv_path`` / ``test_sample_ids`` /
-    ``experiment`` / ``seed`` are optional provenance recorded into the
+    ``experiment`` / ``seed`` / ``model_id`` / ``pretrained_source`` /
+    ``preprocessing_fingerprint`` are optional provenance recorded into the
     artifact so a later :func:`validate_calibration_artifact` call can
-    detect (and fail loudly on) cross-seed/cross-model contamination --
-    e.g. evaluating one checkpoint against a calibration artifact actually
-    fit for a different checkpoint or a differently-ordered test split.
-    Omitting them keeps this function usable in contexts (tests, ad-hoc
-    analysis) that don't have a real checkpoint/split file on disk; no
-    validation is performed against fields that were never recorded.
+    detect (and fail loudly on) cross-seed/cross-model/cross-preprocessing
+    contamination -- e.g. evaluating one checkpoint against a calibration
+    artifact actually fit for a different checkpoint, a differently-ordered
+    test split, or a different resolved preprocessing (input size/mean/std/
+    interpolation/crop_pct). Omitting them keeps this function usable in
+    contexts (tests, ad-hoc analysis) that don't have a real checkpoint/
+    split file on disk; no validation is performed against fields that were
+    never recorded.
     """
     scores = compute_nonconformity_scores(y_true_val, q10_val, q90_val)
     offset = fit_conformal_offset(scores, alpha)
@@ -100,6 +122,9 @@ def fit_and_save_calibration(
         "n_calibration_samples": int(len(y_true_val)),
         "experiment": experiment,
         "seed": seed,
+        "model_id": model_id,
+        "pretrained_source": pretrained_source,
+        "preprocessing_fingerprint": preprocessing_fingerprint,
         "checkpoint_sha256": file_sha256(checkpoint_path) if checkpoint_path is not None else None,
         "split_csv_sha256": file_sha256(split_csv_path) if split_csv_path is not None else None,
         "test_sample_id_hash": compute_ordered_id_hash(test_sample_ids) if test_sample_ids is not None else None,
@@ -124,18 +149,23 @@ def validate_calibration_artifact(
     checkpoint_path: str | Path | None = None,
     split_csv_path: str | Path | None = None,
     test_sample_ids: Sequence | None = None,
+    model_id: str | None = None,
+    pretrained_source: str | None = None,
+    preprocessing_fingerprint: str | None = None,
 ) -> None:
     """Fail loudly if ``artifact`` was fit against a different checkpoint, split
-    file, or ordered test-sample set than the ones supplied here.
+    file, ordered test-sample set, model identifier, pretrained source, or
+    resolved preprocessing than the ones supplied here.
 
-    This is what stops cross-seed/cross-model calibration contamination:
-    silently applying seed 42's (or model A's) conformal offset to seed
-    123's (or model B's) test predictions just because both calibration
-    artifacts happen to live in a similarly-named directory or have the
-    same array length. Only fields the artifact actually recorded are
-    checked -- an older artifact fit before this provenance existed has
-    those fields as ``None`` and is intentionally not validated (there is
-    nothing on disk yet to compare against).
+    This is what stops cross-seed/cross-model/cross-preprocessing
+    calibration contamination: silently applying seed 42's (or model A's,
+    or a different crop_pct's) conformal offset to seed 123's (or model
+    B's) test predictions just because both calibration artifacts happen
+    to live in a similarly-named directory or have the same array length.
+    Only fields the artifact actually recorded are checked -- an older
+    artifact fit before a given provenance field existed has it as
+    ``None`` and is intentionally not validated against that field (there
+    is nothing on disk yet to compare against).
     """
     checks: list[tuple[str, str | None, str]] = []
     if checkpoint_path is not None:
@@ -144,6 +174,12 @@ def validate_calibration_artifact(
         checks.append(("split_csv_sha256", file_sha256(split_csv_path), "split CSV"))
     if test_sample_ids is not None:
         checks.append(("test_sample_id_hash", compute_ordered_id_hash(test_sample_ids), "ordered test-sample IDs"))
+    if model_id is not None:
+        checks.append(("model_id", model_id, "model identifier"))
+    if pretrained_source is not None:
+        checks.append(("pretrained_source", pretrained_source, "pretrained source"))
+    if preprocessing_fingerprint is not None:
+        checks.append(("preprocessing_fingerprint", preprocessing_fingerprint, "resolved preprocessing"))
 
     for field, actual_value, label in checks:
         recorded_value = artifact.get(field)

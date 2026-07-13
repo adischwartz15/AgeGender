@@ -25,7 +25,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.dataset import FaceMultiTaskDataset
-from src.data.transforms import EvalTransform
+from src.data.transforms import resolve_eval_transform
 from src.evaluation.calibration import apply_conformal_offset, load_calibration, validate_calibration_artifact
 from src.evaluation.comparison import build_parametric_vs_knn_table
 from src.evaluation.knn_baseline import KNNEmbeddingBaseline
@@ -164,17 +164,17 @@ def evaluate_checkpoint(
         return None
     df = pd.read_csv(splits_path)
     test_df = df[df["split"] == "test"]
-    # A model that declares its own preprocessing (currently only
-    # PretrainedVOLOFaceOnlyMultiTask, whose transform is resolved from its
-    # pretrained backbone's own config) is evaluated with that transform
-    # instead of this project's 128px/IMAGENET-constant default -- every
-    # core model has no such method, so this is a no-op for them and this
-    # exact function is what makes the evaluation path byte-identical for
-    # both a core checkpoint and a transfer-learning checkpoint.
-    if hasattr(model, "build_transforms"):
-        _, eval_transform = model.build_transforms()
-    else:
-        eval_transform = EvalTransform(config["dataset"]["image_size"])
+    # A model that declares its own preprocessing (VOLO / pretrained-ResNet,
+    # resolved from its pretrained backbone's own config) is evaluated with
+    # that transform instead of this project's 128px/IMAGENET-constant
+    # default -- every core model has no such method, so this is a no-op
+    # for them. See src/data/transforms.py::resolve_eval_transform, the
+    # single place this resolution logic lives (also used by
+    # scripts/calibrate.py, scripts/run_robustness.py,
+    # scripts/build_knn_index.py, and src/inference/predictor.py) --
+    # what makes the evaluation path byte-identical for a core checkpoint
+    # and a transfer-learning checkpoint alike.
+    eval_transform = resolve_eval_transform(model, config)
     dataset = FaceMultiTaskDataset(test_df, eval_transform)
 
     preds = run_inference(model, dataset, device)
