@@ -29,7 +29,7 @@ src/evaluation/comparison.py:aggregate_seed_metrics and
 scripts/generate_final_report.py.
 
 Usage:
-    python scripts/run_seeds.py --experiment exp_c_shared_adapters --seeds 42,43,44
+    python scripts/run_seeds.py --experiment exp_c_shared_adapters --seeds 42,123,2026
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ logger = get_logger("scripts.run_seeds")
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment", required=True, help="Experiment name from configs/experiments.yaml")
-    parser.add_argument("--seeds", required=True, help="Comma-separated seeds, e.g. 42,43,44 (>=2 needed for a real std)")
+    parser.add_argument("--seeds", required=True, help="Comma-separated seeds, e.g. 42,123,2026 (>=2 needed for a real std)")
     args = parser.parse_args()
 
     seeds = [int(s.strip()) for s in args.seeds.split(",")]
