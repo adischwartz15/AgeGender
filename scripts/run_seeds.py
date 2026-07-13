@@ -45,6 +45,7 @@ from calibrate import calibrate_checkpoint  # noqa: E402
 from evaluate import evaluate_checkpoint  # noqa: E402
 from train import run_training  # noqa: E402
 
+from src.training.progress import emit, format_multi_seed_preflight  # noqa: E402
 from src.utils.config import REPO_ROOT, load_config, load_full_config  # noqa: E402
 from src.utils.experiment_paths import experiment_paths  # noqa: E402
 from src.utils.logging import get_logger  # noqa: E402
@@ -69,6 +70,29 @@ def main() -> int:
         logger.error("Unknown experiment '%s'. See configs/experiments.yaml.", args.experiment)
         return 1
     base_overrides = experiments_cfg[args.experiment].get("overrides", {})
+
+    # This script has no resume/skip-completed logic of its own (unlike
+    # scripts/run_transfer_learning.py's PersistentArtifactManager-backed
+    # seeds) -- every requested seed is always (re)trained from scratch.
+    # "already has a checkpoint" here is informational only, not a "will be
+    # reused" signal, so it is never reported as "completed (reused)".
+    already_has_checkpoint = [
+        s for s in seeds
+        if (experiment_paths(args.experiment, s)["checkpoint_dir"] / f"{args.experiment}_seed{s}_best_balanced_score.pt").exists()
+    ]
+    emit(
+        format_multi_seed_preflight(
+            args.experiment, requested_seeds=seeds, completed_seeds=[],
+            incomplete_resumable_seeds=[], missing_seeds=[s for s in seeds if s not in already_has_checkpoint],
+            will_run_now_seeds=seeds,
+        )
+    )
+    if already_has_checkpoint:
+        emit(
+            f"[{args.experiment}] Note: seed(s) {already_has_checkpoint} already have a checkpoint from a "
+            "previous run -- this script has no skip/resume logic, so they will be retrained from scratch "
+            "and that checkpoint overwritten."
+        )
 
     for seed in seeds:
         run_name = f"{args.experiment}_seed{seed}"

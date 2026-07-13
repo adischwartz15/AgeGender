@@ -162,6 +162,18 @@ def test_all_referenced_bootstrap_variables_are_actually_defined(path):
 
 
 @pytest.mark.parametrize("path", NOTEBOOK_PATHS, ids=lambda p: p.name)
+def test_live_status_table_cell_exists_and_reuses_scan_artifact_root(path):
+    """The reusable live status-table cell must call the real
+    scan_artifact_root() (src/training/persistent_artifacts.py), never
+    reimplement the directory-scanning logic inline in the notebook."""
+    nb = _load(path)
+    code = _code_cell_containing(nb, "show_artifact_status_table")
+    assert "from src.training.persistent_artifacts import scan_artifact_root" in code
+    assert "scan_artifact_root(root)" in code
+    ast.parse(code)
+
+
+@pytest.mark.parametrize("path", NOTEBOOK_PATHS, ids=lambda p: p.name)
 def test_notebook_remains_valid_nbformat(path):
     import warnings
 

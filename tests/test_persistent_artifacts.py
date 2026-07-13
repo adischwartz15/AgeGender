@@ -19,6 +19,7 @@ from src.training.persistent_artifacts import (
     capture_rng_state,
     format_status_line,
     restore_rng_state,
+    scan_artifact_root,
     seed_status_report,
 )
 
@@ -245,3 +246,72 @@ def test_rng_state_roundtrip_reproduces_next_draw(tmp_path):
     restore_rng_state(state)
     second_draw = random.random()
     assert first_draw == second_draw
+
+
+# -- scan_artifact_root ---------------------------------------------------------------
+
+
+def test_scan_artifact_root_empty_root_returns_no_rows(tmp_path):
+    assert scan_artifact_root(tmp_path / "does_not_exist") == []
+
+
+def test_scan_artifact_root_reports_not_started_when_no_state_files(tmp_path):
+    manager = PersistentArtifactManager("exp_a", seed=42, local_root=tmp_path)
+    rows = scan_artifact_root(tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["experiment"] == "exp_a"
+    assert rows[0]["seed"] == 42
+    assert rows[0]["status"] == "NOT STARTED"
+    assert rows[0]["checkpoint"] is None
+    assert manager  # manager's mkdir side effect is what created the seed_42 dir scan_artifact_root finds
+
+
+def test_scan_artifact_root_reports_incomplete_with_stage_epoch_and_checkpoint(tmp_path):
+    manager = PersistentArtifactManager("exp_b", seed=123, local_root=tmp_path)
+    manager.save_last_checkpoint(_tiny_payload(epoch=5, stage="Stage 2: fine-tune"))
+    manager.save_training_state(
+        {"training_stage": "Stage 2: fine-tune", "global_epoch": 5, "best_validation_metric": 0.42}
+    )
+    rows = scan_artifact_root(tmp_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "INCOMPLETE"
+    assert row["stage"] == "Stage 2: fine-tune"
+    assert row["epoch"] == 5
+    assert row["best_score"] == 0.42
+    assert row["checkpoint"].endswith("last.pt")
+    assert row["last_update"] is not None
+
+
+def test_scan_artifact_root_reports_complete_and_prefers_best_checkpoint(tmp_path):
+    manager = PersistentArtifactManager("exp_c", seed=42, local_root=tmp_path)
+    manager.save_last_checkpoint(_tiny_payload())
+    manager.save_best_checkpoint(_tiny_payload())
+    manager.mark_seed_complete(
+        {"seed": 42, "status": "complete", "best_checkpoint": str(manager.checkpoints_dir / "best.pt"),
+         "test_metrics": {"balanced_score": 0.9}, "completed_at": "2026-01-01T00:00:00Z"}
+    )
+    rows = scan_artifact_root(tmp_path)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "COMPLETE"
+    assert row["best_score"] == 0.9
+    assert row["checkpoint"].endswith("best.pt")
+
+
+def test_scan_artifact_root_covers_multiple_experiments_and_seeds(tmp_path):
+    PersistentArtifactManager("exp_a", seed=42, local_root=tmp_path)
+    PersistentArtifactManager("exp_a", seed=123, local_root=tmp_path)
+    PersistentArtifactManager("exp_b", seed=42, local_root=tmp_path)
+    rows = scan_artifact_root(tmp_path)
+    pairs = {(r["experiment"], r["seed"]) for r in rows}
+    assert pairs == {("exp_a", 42), ("exp_a", 123), ("exp_b", 42)}
+
+
+def test_scan_artifact_root_is_read_only(tmp_path):
+    manager = PersistentArtifactManager("exp_a", seed=42, local_root=tmp_path)
+    manager.save_last_checkpoint(_tiny_payload())
+    before = {p: p.stat().st_mtime for p in tmp_path.rglob("*") if p.is_file()}
+    scan_artifact_root(tmp_path)
+    after = {p: p.stat().st_mtime for p in tmp_path.rglob("*") if p.is_file()}
+    assert before == after

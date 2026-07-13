@@ -25,6 +25,7 @@ docstring for that distinction).
 
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -188,6 +189,11 @@ class PersistentArtifactManager:
         )
         for sub in ("checkpoints", "state", "metrics", "predictions", "plots", "logs"):
             (self.local_seed_dir / sub).mkdir(parents=True, exist_ok=True)
+        # Set by find_latest_valid_checkpoint() to whichever file (last.pt or
+        # previous_last.pt) actually resolved -- lets a caller report a
+        # precise resume announcement (path + checksum) without duplicating
+        # that method's fallback resolution logic.
+        self.last_resolved_checkpoint_path: Path | None = None
 
     # -- path helpers ---------------------------------------------------------------
 
@@ -307,6 +313,7 @@ class PersistentArtifactManager:
         least one checkpoint file exists but none loads validly -- that is
         data loss, not a fresh start, and must never be silently treated as one.
         """
+        self.last_resolved_checkpoint_path = None
         last_exists = (self.checkpoints_dir / "last.pt").exists()
         previous_exists = (self.checkpoints_dir / "previous_last.pt").exists()
         if not last_exists and not previous_exists:
@@ -314,6 +321,7 @@ class PersistentArtifactManager:
 
         payload = self._try_load_checkpoint("last.pt")
         if payload is not None:
+            self.last_resolved_checkpoint_path = self.checkpoints_dir / "last.pt"
             return payload
 
         if last_exists:
@@ -323,6 +331,7 @@ class PersistentArtifactManager:
             )
         payload = self._try_load_checkpoint("previous_last.pt")
         if payload is not None:
+            self.last_resolved_checkpoint_path = self.checkpoints_dir / "previous_last.pt"
             return payload
 
         raise CorruptedCheckpointError(
@@ -331,6 +340,16 @@ class PersistentArtifactManager:
             "from scratch -- inspect "
             f"{self.checkpoints_dir} manually before proceeding."
         )
+
+    def last_resolved_checkpoint_sha256(self) -> str | None:
+        """SHA-256 of whichever file :meth:`find_latest_valid_checkpoint`
+        most recently resolved to (``None`` if it hasn't been called, found
+        nothing, or the file has since disappeared) -- powers a resume
+        announcement's "checkpoint sha256" field without re-deriving which
+        of last.pt/previous_last.pt was actually used."""
+        if self.last_resolved_checkpoint_path is None or not self.last_resolved_checkpoint_path.exists():
+            return None
+        return sha256_file(self.last_resolved_checkpoint_path)
 
     def load_best_checkpoint(self) -> dict | None:
         return self._try_load_checkpoint("best.pt")
@@ -532,6 +551,92 @@ def seed_status_report(
 
 def format_status_line(status: dict) -> str:
     return f"Seed {status['seed']:<5}: {status['status']:<11} -- {status['detail']}"
+
+
+def _read_json_or_none(path: Path) -> dict | None:
+    if not path.exists():
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def scan_artifact_root(root: str | Path) -> list[dict]:
+    """Scan a :class:`PersistentArtifactManager`-style root directory
+    (``<root>/<experiment_name>/seed_<seed>/...``) and return one summary
+    row per experiment/seed directory found -- read-only, never mutates
+    anything under ``root``. Powers a notebook's live status-table display
+    (see ``docs/transfer_learning.md`` "Persistent artifacts" for the
+    directory layout this reads) without duplicating that layout knowledge
+    in notebook code.
+
+    Each row: ``experiment``, ``seed``, ``status`` (``COMPLETE`` /
+    ``INCOMPLETE`` / ``NOT STARTED`` / ``CORRUPTED``), ``stage``, ``epoch``,
+    ``best_score``, ``last_update`` (UTC ISO timestamp of the most recently
+    modified state file, or ``None``), ``checkpoint`` (best.pt if present,
+    else last.pt, else ``None``).
+    """
+    root = Path(root)
+    rows: list[dict] = []
+    if not root.exists():
+        return rows
+
+    for experiment_dir in sorted(p for p in root.iterdir() if p.is_dir()):
+        for seed_dir in sorted(experiment_dir.glob("seed_*")):
+            if not seed_dir.is_dir():
+                continue
+            try:
+                seed = int(seed_dir.name[len("seed_"):])
+            except ValueError:
+                continue
+
+            state_dir = seed_dir / "state"
+            trainer_state = _read_json_or_none(state_dir / "trainer_state.json")
+            completion = _read_json_or_none(state_dir / "completion.json")
+
+            if completion is not None and completion.get("status") == "complete":
+                status = "COMPLETE"
+            elif trainer_state is not None:
+                status = "INCOMPLETE"
+            else:
+                status = "NOT STARTED"
+
+            stage = None
+            epoch = None
+            best_score = None
+            if trainer_state is not None:
+                stage = trainer_state.get("training_stage")
+                epoch = trainer_state.get("global_epoch")
+                best_score = trainer_state.get("best_validation_metric")
+            if completion is not None:
+                stage = stage or completion.get("training_stage")
+                if best_score is None:
+                    test_metrics = completion.get("test_metrics") or {}
+                    best_score = test_metrics.get("balanced_score")
+
+            checkpoint = None
+            for name in ("best.pt", "last.pt"):
+                candidate = seed_dir / "checkpoints" / name
+                if candidate.exists():
+                    checkpoint = str(candidate)
+                    break
+
+            last_update = None
+            state_file = state_dir / "trainer_state.json"
+            if state_file.exists():
+                last_update = datetime.datetime.fromtimestamp(
+                    state_file.stat().st_mtime, tz=datetime.timezone.utc
+                ).isoformat()
+
+            rows.append(
+                {
+                    "experiment": experiment_dir.name, "seed": seed, "status": status, "stage": stage,
+                    "epoch": epoch, "best_score": best_score, "last_update": last_update, "checkpoint": checkpoint,
+                }
+            )
+    return rows
 
 
 _ARCHIVE_EXCLUDED_SUBDIRS = {"predictions"}

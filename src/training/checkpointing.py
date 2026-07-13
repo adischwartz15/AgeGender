@@ -60,6 +60,7 @@ class BestMetricTracker:
             raise ValueError("mode must be 'min' or 'max'")
         self.mode = mode
         self.best_value: float | None = None
+        self.best_epoch: int | None = None
 
     def is_improvement(self, value: float) -> bool:
         if self.best_value is None:
@@ -68,8 +69,9 @@ class BestMetricTracker:
             return value < self.best_value
         return value > self.best_value
 
-    def update(self, value: float) -> bool:
+    def update(self, value: float, epoch: int | None = None) -> bool:
         improved = self.is_improvement(value)
         if improved:
             self.best_value = value
+            self.best_epoch = epoch
         return improved

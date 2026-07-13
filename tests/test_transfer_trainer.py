@@ -353,3 +353,74 @@ def test_resume_from_stage2_checkpoint_skips_stage1(tmp_path, tiny_transfer_data
     # Stage 1 must be a complete no-op: no new epochs, no re-freezing/retraining.
     assert len(trainer2.history["train_loss"]) == history_len_before
     assert trainer2._resume_stage is None
+
+
+# -- Live progress reporting -----------------------------------------------------------
+
+
+def test_stage_announcement_printed_with_trainable_backbone_info(tmp_path, tiny_transfer_datasets, capsys):
+    """Regression guard for a real bug: TransferTrainer used to report
+    progress only via logger.info(...), which reaches no visible output at
+    all unless some unrelated code happens to configure the root logger
+    (see src/training/progress.py's module docstring) -- everything must
+    also go through print(..., flush=True) via emit()."""
+    model, train_dataset, val_dataset = tiny_transfer_datasets
+    trainer = TransferTrainer(
+        model, _tiny_transfer_config(), train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="volo_stage_announce", output_dir=tmp_path / "output",
+    )
+    trainer.run_stage_1()
+    captured = capsys.readouterr()
+    assert STAGE_1_NAME in captured.out
+    assert "trainable_params=" in captured.out
+    assert "backbone parts:" in captured.out
+
+
+def test_epoch_report_printed_with_full_metric_surface(tmp_path, tiny_transfer_datasets, capsys):
+    model, train_dataset, val_dataset = tiny_transfer_datasets
+    trainer = TransferTrainer(
+        model, _tiny_transfer_config(), train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="volo_epoch_report", output_dir=tmp_path / "output",
+    )
+    trainer.run_stage_1()
+    captured = capsys.readouterr()
+    for expected in (
+        "balanced_acc=", "f1=", "selective_acc=", "coverage=", "abstention=",
+        "log_var:", "loss_weights:", "backbone=", "adapters=", "heads=", "balance=",
+        "selection_score=", "checkpoint:",
+    ):
+        assert expected in captured.out, f"missing {expected!r} in epoch report output"
+
+
+def test_resume_announcement_printed_with_source_stage_and_checksums(tmp_path, tiny_transfer_datasets, capsys):
+    model, train_dataset, val_dataset = tiny_transfer_datasets
+    full_config = _tiny_transfer_config()
+    full_config["training"]["head_only_epochs"] = 3
+
+    manager = PersistentArtifactManager("volo_resume_announce", seed=0, local_root=tmp_path / "artifacts")
+    trainer1 = TransferTrainer(
+        model, full_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints1", experiment_name="volo_resume_announce", output_dir=tmp_path / "output1",
+        artifact_manager=manager, split_sha256="split-hash-abc123",
+    )
+    model.freeze_backbone()
+    backbone_lr, adapter_lr, head_lr, balance_lr, warmup_epochs, patience = trainer1._stage_lrs()
+    trainer1._run_stage(STAGE_1_NAME, 2, backbone_lr, adapter_lr, head_lr, balance_lr, warmup_epochs, patience, global_epoch=0)
+
+    resume_payload = manager.find_latest_valid_checkpoint()
+    capsys.readouterr()  # discard trainer1's own output
+
+    model2 = PretrainedVOLOFaceOnlyMultiTask(_tiny_transfer_config())
+    TransferTrainer(
+        model2, full_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints2", experiment_name="volo_resume_announce", output_dir=tmp_path / "output2",
+        artifact_manager=manager, resume_state=resume_payload, resume_source="persistent",
+        split_sha256="split-hash-abc123",
+    )
+    captured = capsys.readouterr()
+    assert "Resuming training:" in captured.out
+    assert "resume source:     persistent" in captured.out
+    assert f"stage:             {STAGE_1_NAME}" in captured.out
+    assert "checkpoint sha256:" in captured.out
+    assert "n/a" not in captured.out.split("checkpoint sha256:")[1].split("\n")[0]  # a real hash, not "n/a"
+    assert "split sha256:      split-hash-abc123" in captured.out

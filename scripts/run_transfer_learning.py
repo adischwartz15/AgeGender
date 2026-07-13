@@ -61,6 +61,7 @@ from src.evaluation.comparison import aggregate_seed_metrics, build_transfer_lea
 from src.training.persistent_artifacts import (  # noqa: E402
     CorruptedCheckpointError, PersistentArtifactManager, SeedCompletionInfo, build_summary_archive, sha256_file,
 )
+from src.training.progress import emit, format_multi_seed_preflight  # noqa: E402
 from src.utils.config import CONFIG_DIR, REPO_ROOT, _deep_merge, _load_yaml, load_config  # noqa: E402
 from src.utils.experiment_paths import experiment_paths  # noqa: E402
 from src.utils.provenance import dependency_versions, git_commit_sha  # noqa: E402
@@ -278,8 +279,22 @@ def run_volo_seed(seed: int, args: argparse.Namespace) -> dict | None:
         experiment_name, seed, local_root=_local_root(args.storage_root),
         persistent_root=_persistent_root(args.persistent_root), sync_after_epoch=args.sync_after_epoch,
     )
+    restored_files: list = []
     if _persistent_root(args.persistent_root) is not None:
-        manager.restore_seed()
+        restored_files = manager.restore_seed()
+    resume_source = "persistent" if restored_files else "local"
+
+    manager.save_run_manifest(
+        {
+            "experiment_name": experiment_name, "seed": seed, "model_family": family,
+            "model_id": model_id, "pretrained_source": pretrained_source,
+            "split_sha256": split_sha256, "git_commit_sha": git_sha,
+            "dependency_versions": dependency_versions(),
+            "storage_root": str(_local_root(args.storage_root)),
+            "persistent_root": str(_persistent_root(args.persistent_root)) if _persistent_root(args.persistent_root) else None,
+            "started_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        }
+    )
 
     if args.skip_completed and manager.is_seed_complete(
         expected_split_sha256=split_sha256, expected_model_id=model_id, expected_pretrained_source=pretrained_source,
@@ -332,6 +347,7 @@ def run_volo_seed(seed: int, args: argparse.Namespace) -> dict | None:
         model, config, datasets["train"], datasets["validation"],
         device=_resolve_device(), checkpoint_dir=legacy_checkpoint_dir, experiment_name=run_name,
         output_dir=legacy_output_dir, artifact_manager=manager, resume_state=resume_state,
+        resume_source=resume_source if resume_state is not None else None,
         git_commit_sha=git_sha, split_sha256=split_sha256,
     )
     trainer.train()
@@ -455,18 +471,52 @@ def _atomic_write_csv(df, path: Path) -> None:
 
 
 def print_seed_status(seeds: list[int], args: argparse.Namespace) -> None:
-    """Startup status display: 'Seed 42: COMPLETE -- reused' / 'Seed 123:
-    INCOMPLETE -- resuming from epoch 11, Stage 2' / 'Seed 2026: NOT STARTED'.
-    Mirrors the status cells in both notebooks' persistence sections."""
+    """Startup status display: per-seed detail lines ('Seed 42: COMPLETE --
+    reused' / 'Seed 123: INCOMPLETE -- resuming from epoch 11, Stage 2' /
+    'Seed 2026: NOT STARTED'), preceded by a categorized multi-seed plan
+    summary (requested/completed/incomplete-resumable/missing/will-run-now)
+    -- printed before any training starts, so it's immediately clear from
+    the top of a run's output what this invocation is and isn't about to
+    do. Mirrors the status cells in both notebooks' persistence sections."""
     from src.training.persistent_artifacts import format_status_line, seed_status_report
 
     experiment_name = _MODEL_FAMILIES[args.model_family]["experiment_name"]
     split_sha256 = _split_sha256()
-    for seed in seeds:
-        status = seed_status_report(
+    statuses = [
+        seed_status_report(
             experiment_name, seed, _local_root(args.storage_root), _persistent_root(args.persistent_root),
             expected_split_sha256=split_sha256,
         )
+        for seed in seeds
+    ]
+    completed, incomplete_resumable, missing, corrupted = [], [], [], []
+    for seed, status in zip(seeds, statuses):
+        {
+            "COMPLETE": completed, "INCOMPLETE": incomplete_resumable,
+            "NOT STARTED": missing, "CORRUPTED": corrupted,
+        }[status["status"]].append(seed)
+
+    if args.evaluate_only:
+        will_run_now: list[int] = []
+    elif args.skip_completed:
+        will_run_now = [s for s in seeds if s not in completed]
+    else:
+        will_run_now = list(seeds)
+
+    emit(
+        format_multi_seed_preflight(
+            experiment_name, requested_seeds=seeds, completed_seeds=completed,
+            incomplete_resumable_seeds=incomplete_resumable, missing_seeds=missing,
+            will_run_now_seeds=will_run_now,
+        )
+    )
+    if corrupted:
+        logger.warning(
+            "seed(s) %s have a CORRUPTED checkpoint (both last.pt and previous_last.pt failed to "
+            "load) -- these will raise CorruptedCheckpointError rather than silently restarting.",
+            corrupted,
+        )
+    for status in statuses:
         logger.info(format_status_line(status))
 
 

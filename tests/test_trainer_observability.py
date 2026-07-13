@@ -136,6 +136,94 @@ def test_max_batches_per_epoch_defaults_to_unlimited(tmp_path, synthetic_metadat
     assert trainer.max_val_batches is None
 
 
+def test_trainer_writes_run_manifest_once_at_start(tmp_path, synthetic_metadata_df, tiny_config):
+    tiny_config["training"]["warm_up_from_scratch"]["epochs"] = 2
+    train_dataset, val_dataset = _build_datasets(synthetic_metadata_df, tiny_config, seed=6)
+    model = build_multitask_model(tiny_config)
+    output_dir = tmp_path / "output"
+    trainer = Trainer(
+        model, tiny_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="manifest_test", output_dir=output_dir,
+    )
+    trainer.train()
+
+    manifest_path = output_dir / "logs" / "manifest_test_run_manifest.json"
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    for key in (
+        "experiment_name", "seed", "device", "train_samples", "val_samples", "trainable_params",
+        "total_params", "stages", "total_epochs_planned", "checkpoint_selection_metric", "started_at_utc",
+    ):
+        assert key in manifest
+    assert manifest["experiment_name"] == "manifest_test"
+    assert manifest["total_epochs_planned"] == 2
+
+
+def test_trainer_writes_last_checkpoint_every_epoch(tmp_path, synthetic_metadata_df, tiny_config):
+    tiny_config["training"]["warm_up_from_scratch"]["epochs"] = 2
+    train_dataset, val_dataset = _build_datasets(synthetic_metadata_df, tiny_config, seed=7)
+    model = build_multitask_model(tiny_config)
+    trainer = Trainer(
+        model, tiny_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="last_ckpt_test", output_dir=tmp_path / "output",
+    )
+    trainer.train()
+
+    last_path = tmp_path / "checkpoints" / "last_ckpt_test_last.pt"
+    assert last_path.exists()
+    assert not last_path.with_suffix(last_path.suffix + ".tmp").exists()
+    import torch
+
+    payload = torch.load(last_path, map_location="cpu", weights_only=False)
+    assert payload["epoch"] == 2
+    assert "model_state_dict" in payload
+
+
+def test_history_includes_gender_balanced_accuracy_and_f1(tmp_path, synthetic_metadata_df, tiny_config):
+    train_dataset, val_dataset = _build_datasets(synthetic_metadata_df, tiny_config, seed=8)
+    model = build_multitask_model(tiny_config)
+    trainer = Trainer(
+        model, tiny_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="balanced_acc_test", output_dir=tmp_path / "output",
+    )
+    result = trainer.train()
+    assert "val_gender_balanced_accuracy" in result["history"]
+    assert "val_gender_f1" in result["history"]
+    assert len(result["history"]["val_gender_balanced_accuracy"]) == len(result["history"]["train_loss"])
+
+
+def test_best_metric_tracker_records_best_epoch(tmp_path, synthetic_metadata_df, tiny_config):
+    train_dataset, val_dataset = _build_datasets(synthetic_metadata_df, tiny_config, seed=9)
+    model = build_multitask_model(tiny_config)
+    trainer = Trainer(
+        model, tiny_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="best_epoch_test", output_dir=tmp_path / "output",
+    )
+    assert trainer._maybe_checkpoint("age_mae", 10.0, epoch=1, metrics={}) is True
+    assert trainer.trackers["age_mae"].best_epoch == 1
+    assert trainer._maybe_checkpoint("age_mae", 12.0, epoch=2, metrics={}) is False
+    assert trainer.trackers["age_mae"].best_epoch == 1  # unchanged -- epoch 2 was worse
+    assert trainer._maybe_checkpoint("age_mae", 8.0, epoch=3, metrics={}) is True
+    assert trainer.trackers["age_mae"].best_epoch == 3
+
+
+def test_epoch_progress_is_printed_unbuffered(tmp_path, synthetic_metadata_df, tiny_config, capsys):
+    tiny_config["training"]["warm_up_from_scratch"]["epochs"] = 1
+    train_dataset, val_dataset = _build_datasets(synthetic_metadata_df, tiny_config, seed=10)
+    model = build_multitask_model(tiny_config)
+    trainer = Trainer(
+        model, tiny_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="print_test", output_dir=tmp_path / "output",
+    )
+    trainer.train()
+    captured = capsys.readouterr()
+    assert "print_test" in captured.out
+    assert "Epoch 01/01" in captured.out
+    assert "balanced_acc=" in captured.out
+    assert "log_var:" in captured.out
+    assert "checkpoint:" in captured.out
+
+
 def test_backward_compatible_without_explicit_output_dir(tmp_path, synthetic_metadata_df, tiny_config):
     """Trainer must still work when output_dir is omitted (existing callers /
     older test code), defaulting sensibly to checkpoint_dir.parent."""

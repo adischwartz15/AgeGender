@@ -32,11 +32,13 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from src.evaluation.metrics import gender_balanced_accuracy, gender_precision_recall_f1
 from src.losses.multitask_loss import compute_multitask_loss
 from src.models.pretrained_volo import PretrainedVOLOFaceOnlyMultiTask
 from src.training.callbacks import EarlyStopping
 from src.training.checkpointing import BestMetricTracker, save_checkpoint
 from src.training.persistent_artifacts import PersistentArtifactManager, capture_rng_state, restore_rng_state
+from src.training.progress import emit, format_epoch_report, format_resume_announcement, format_stage_announcement
 from src.training.trainer import _build_scheduler, resolve_loss_balancing
 from src.utils.seed import seed_worker
 
@@ -74,8 +76,12 @@ def _run_epoch(
 
     total_loss, total_age_loss, total_gender_loss = 0.0, 0.0, 0.0
     n_age_batches, n_gender_batches, n_batches = 0, 0, 0
+    eff_age_w, eff_gender_w, lv_age, lv_gender = 0.0, 0.0, 0.0, 0.0
     age_abs_errors = []
     gender_correct, gender_total = 0, 0
+    gender_correct_accepted, gender_total_accepted = 0, 0
+    gender_confidences = []
+    gender_true_labels, gender_pred_labels = [], []
     optimizer_steps = 0
     skipped_optimizer_steps = 0
     microbatches_processed = 0
@@ -159,6 +165,9 @@ def _run_epoch(
         if loss_out.age_loss is not None:
             total_age_loss += loss_out.age_loss.item()
             n_age_batches += 1
+            eff_age_w += loss_out.effective_age_weight
+            if loss_out.log_var_age is not None:
+                lv_age += loss_out.log_var_age
             with torch.no_grad():
                 valid = age_mask.bool()
                 if valid.any():
@@ -167,20 +176,62 @@ def _run_epoch(
         if loss_out.gender_loss is not None:
             total_gender_loss += loss_out.gender_loss.item()
             n_gender_batches += 1
+            eff_gender_w += loss_out.effective_gender_weight
+            if loss_out.log_var_gender is not None:
+                lv_gender += loss_out.log_var_gender
             with torch.no_grad():
                 valid = gender_mask.bool()
                 if valid.any():
-                    preds = torch.softmax(outputs["gender_logits"][valid], dim=-1).argmax(dim=-1)
+                    probs = torch.softmax(outputs["gender_logits"][valid], dim=-1)
+                    preds = probs.argmax(dim=-1)
+                    confidence = probs.max(dim=-1).values
                     correct = preds == gender_target[valid]
                     gender_correct += correct.sum().item()
                     gender_total += int(valid.sum().item())
+                    # Selective accuracy/coverage/abstention (confidence-threshold
+                    # aware) mirror Trainer._run_batches -- tracked purely for the
+                    # live progress line / history, never used for checkpoint
+                    # selection (_balanced_score always uses raw gender_accuracy).
+                    accepted = confidence >= confidence_threshold
+                    gender_correct_accepted += (correct & accepted).sum().item()
+                    gender_total_accepted += int(accepted.sum().item())
+                    gender_confidences.append(confidence.detach().cpu())
+                    gender_true_labels.append(gender_target[valid].detach().cpu())
+                    gender_pred_labels.append(preds.detach().cpu())
+
+    gender_abstention_value = float("nan")
+    if gender_confidences:
+        all_confidence = torch.cat(gender_confidences)
+        gender_abstention_value = float((all_confidence < confidence_threshold).float().mean().item())
+
+    gender_balanced_acc_value = float("nan")
+    gender_f1_value = float("nan")
+    if gender_true_labels:
+        y_true = torch.cat(gender_true_labels).numpy()
+        y_pred = torch.cat(gender_pred_labels).numpy()
+        gender_balanced_acc_value = gender_balanced_accuracy(y_true, y_pred)
+        gender_f1_value = gender_precision_recall_f1(y_true, y_pred)["f1"]
 
     return {
         "loss": total_loss / max(1, n_batches),
         "age_loss": total_age_loss / max(1, n_age_batches),
         "gender_loss": total_gender_loss / max(1, n_gender_batches),
+        "effective_age_weight": eff_age_w / max(1, n_age_batches),
+        "effective_gender_weight": eff_gender_w / max(1, n_gender_batches),
+        "log_var_age": lv_age / max(1, n_age_batches),
+        "log_var_gender": lv_gender / max(1, n_gender_batches),
         "age_mae": float(torch.cat(age_abs_errors).mean()) if age_abs_errors else float("nan"),
+        "age_rmse": float(torch.sqrt((torch.cat(age_abs_errors) ** 2).mean())) if age_abs_errors else float("nan"),
         "gender_accuracy": gender_correct / max(1, gender_total) if gender_total else float("nan"),
+        "gender_balanced_accuracy": gender_balanced_acc_value,
+        "gender_f1": gender_f1_value,
+        "gender_selective_accuracy": (
+            gender_correct_accepted / max(1, gender_total_accepted) if gender_total_accepted else float("nan")
+        ),
+        "gender_abstention": gender_abstention_value,
+        "gender_coverage": (
+            1.0 - gender_abstention_value if gender_abstention_value == gender_abstention_value else float("nan")
+        ),
         "_optimizer_steps": optimizer_steps,
         "_skipped_optimizer_steps": skipped_optimizer_steps,
         "_microbatches_processed": microbatches_processed,
@@ -214,6 +265,7 @@ class TransferTrainer:
         output_dir: str | Path | None = None,
         artifact_manager: PersistentArtifactManager | None = None,
         resume_state: dict | None = None,
+        resume_source: str | None = None,
         git_commit_sha: str | None = None,
         split_sha256: str | None = None,
     ) -> None:
@@ -274,8 +326,10 @@ class TransferTrainer:
         }
         self._best_state_dict: dict | None = None
         self._best_balanced_score: float | None = None
+        self._last_checkpoint_path: Path | None = None
 
         self.artifact_manager = artifact_manager
+        self.resume_source = resume_source
         self.git_commit_sha = git_commit_sha
         self.split_sha256 = split_sha256
         self._global_epoch = 0
@@ -322,9 +376,18 @@ class TransferTrainer:
         rng_state = state.get("rng_state")
         if rng_state:
             restore_rng_state(rng_state)
-        logger.info(
-            "[%s] Resuming from checkpoint: global_epoch=%d training_stage=%r stage_epoch=%d",
-            self.experiment_name, self._global_epoch, self._resume_stage, self._resume_stage_epoch,
+
+        checkpoint_path = None
+        checkpoint_sha256 = None
+        if self.artifact_manager is not None:
+            checkpoint_path = self.artifact_manager.last_resolved_checkpoint_path
+            checkpoint_sha256 = self.artifact_manager.last_resolved_checkpoint_sha256()
+        emit(
+            format_resume_announcement(
+                self.experiment_name, self.training_cfg.get("seed"), self.resume_source or "local",
+                self._resume_stage, self._global_epoch, self._global_step, self._best_balanced_score,
+                checkpoint_path, checkpoint_sha256, self.split_sha256,
+            )
         )
 
     def _build_checkpoint_payload(
@@ -388,12 +451,11 @@ class TransferTrainer:
         resume_scheduler_state: dict | None = None, resume_scaler_state: dict | None = None,
         resume_early_stopping_state: dict | None = None,
     ) -> int:
-        trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        total = sum(p.numel() for p in self.model.parameters())
-        logger.info(
-            "[%s] === %s (epochs=%d, resuming_from_stage_epoch=%d) === trainable_params=%s/%s",
-            self.experiment_name, stage_name, epochs, resume_epoch_in_stage, f"{trainable:,}", f"{total:,}",
-        )
+        if resume_epoch_in_stage:
+            emit(
+                f"[{self.experiment_name} | seed={self.training_cfg.get('seed')}] {stage_name}: "
+                f"resuming from stage epoch {resume_epoch_in_stage} (epochs={epochs})."
+            )
 
         if self.device == "cuda":
             torch.cuda.reset_peak_memory_stats(self.device)
@@ -474,12 +536,24 @@ class TransferTrainer:
                 self._best_state_dict = copy.deepcopy(self.model.state_dict())
                 self._best_balanced_score = balanced
 
-            logger.info(
-                "[%s] %s epoch %d | %.1fs | train_loss=%.4f val_loss=%.4f val_age_mae=%.3f "
-                "val_gender_acc=%.3f | balanced_score=%.4f | best=%s",
-                self.experiment_name, stage_name, global_epoch, elapsed, train_metrics["loss"],
-                val_metrics["loss"], val_metrics["age_mae"], val_metrics["gender_accuracy"], balanced,
-                "yes" if is_best else "no",
+            balanced_tracker = self.trackers["balanced_score"]
+            lr_groups = {
+                "backbone": backbone_lr if backbone_has_trainable else None,
+                "adapters": adapter_lr,
+                "heads": head_lr,
+                "balance": balance_lr if self.model.log_var_age is not None else None,
+            }
+            emit(
+                format_epoch_report(
+                    experiment_name=self.experiment_name, seed=self.training_cfg.get("seed"),
+                    stage_name=stage_name, epoch=epoch_in_stage + 1, total_epochs=epochs,
+                    train_metrics=train_metrics, val_metrics=val_metrics, lr_groups=lr_groups,
+                    selection_score=balanced, is_best=is_best,
+                    best_score=balanced_tracker.best_value, best_epoch=balanced_tracker.best_epoch,
+                    early_stopping_bad_epochs=early_stopping.num_bad_epochs,
+                    early_stopping_patience=early_stopping.patience, epoch_seconds=elapsed,
+                    checkpoint_path=self._last_checkpoint_path,
+                )
             )
 
             should_stop = balanced == balanced and early_stopping.step(balanced)
@@ -502,12 +576,12 @@ class TransferTrainer:
                     self.artifact_manager.on_new_best(payload)
 
             if should_stop:
-                logger.info("[%s] Early stopping triggered in %s at epoch %d", self.experiment_name, stage_name, global_epoch)
+                emit(f"[{self.experiment_name} | seed={self.training_cfg.get('seed')}] Early stopping triggered in {stage_name} at epoch {global_epoch}")
                 break
 
         if self.device == "cuda":
             peak_bytes = torch.cuda.max_memory_allocated(self.device)
-            logger.info("[%s] %s peak CUDA memory: %.1f MiB", self.experiment_name, stage_name, peak_bytes / 2**20)
+            emit(f"[{self.experiment_name} | seed={self.training_cfg.get('seed')}] {stage_name} peak CUDA memory: {peak_bytes / 2**20:.1f} MiB")
 
         return global_epoch
 
@@ -515,7 +589,7 @@ class TransferTrainer:
         if value != value:
             return False
         tracker = self.trackers[metric_name]
-        improved = tracker.update(value)
+        improved = tracker.update(value, epoch)
         if improved:
             path = self.checkpoint_dir / f"{self.experiment_name}_best_{metric_name}.pt"
             save_checkpoint(
@@ -523,6 +597,7 @@ class TransferTrainer:
                 extra={"family": "pretrained_volo", "model_id": self.model.model_id,
                        "pretrained_source": self.model.pretrained_source},
             )
+            self._last_checkpoint_path = path
         return improved
 
     def _stage_lrs(self) -> tuple[float, float, float, float, int, int]:
@@ -558,9 +633,9 @@ class TransferTrainer:
         and Stage 2 as separate cells. If resume state says training already
         reached Stage 2, this is a no-op (never re-runs Stage 1)."""
         if self._resume_stage is not None and self._resume_stage != STAGE_1_NAME:
-            logger.info(
-                "[%s] Resume state is already past Stage 1 (training_stage=%r) -- skipping Stage 1.",
-                self.experiment_name, self._resume_stage,
+            emit(
+                f"[{self.experiment_name} | seed={self.training_cfg.get('seed')}] Resume state is already "
+                f"past Stage 1 (training_stage={self._resume_stage!r}) -- skipping Stage 1."
             )
             self._resume_stage = None
             self._resume_optimizer_state = self._resume_scheduler_state = None
@@ -570,11 +645,13 @@ class TransferTrainer:
         resume_epoch, opt_state, sched_state, scaler_state, es_state = self._consume_resume_state_for(STAGE_1_NAME)
         backbone_lr, adapter_lr, head_lr, balance_lr, warmup_epochs, patience = self._stage_lrs()
         head_only_epochs = self.training_cfg.get("head_only_epochs", 3)
-        logger.info(
-            "[%s] Starting Stage 1 | device=%s | train_samples=%d | val_samples=%d",
-            self.experiment_name, self.device, len(self.train_loader.dataset), len(self.val_loader.dataset),
+        emit(
+            f"[{self.experiment_name} | seed={self.training_cfg.get('seed')}] Starting Stage 1 | "
+            f"device={self.device} | train_samples={len(self.train_loader.dataset)} | "
+            f"val_samples={len(self.val_loader.dataset)}"
         )
         self.model.freeze_backbone()
+        emit(format_stage_announcement(self.experiment_name, self.training_cfg.get("seed"), STAGE_1_NAME, self.model))
         self._global_epoch = self._run_stage(
             STAGE_1_NAME, head_only_epochs, backbone_lr, adapter_lr, head_lr, balance_lr,
             warmup_epochs, patience, global_epoch=self._global_epoch,
@@ -646,6 +723,7 @@ class TransferTrainer:
                 f"training.finetune_unfreeze={finetune_unfreeze!r} must be 'full' or "
                 "{'last_n_stages': N}."
             )
+        emit(format_stage_announcement(self.experiment_name, self.training_cfg.get("seed"), STAGE_2_NAME, self.model))
         self._global_epoch = self._run_stage(
             STAGE_2_NAME, finetune_epochs, backbone_lr, adapter_lr, head_lr, balance_lr,
             warmup_epochs, patience, global_epoch=self._global_epoch,
@@ -661,9 +739,9 @@ class TransferTrainer:
         from {experiment_name}_best_balanced_score.pt. Also flushes history.json."""
         if self._best_state_dict is not None:
             self.model.load_state_dict(self._best_state_dict)
-            logger.info(
-                "[%s] Restored best checkpoint (balanced_score=%.4f)",
-                self.experiment_name, self._best_balanced_score,
+            emit(
+                f"[{self.experiment_name} | seed={self.training_cfg.get('seed')}] "
+                f"Restored best checkpoint (balanced_score={self._best_balanced_score:.4f})"
             )
         with open(self.history_path, "w", encoding="utf-8") as fh:
             json.dump(self.history, fh, indent=2)

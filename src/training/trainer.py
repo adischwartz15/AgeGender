@@ -13,12 +13,15 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from src.evaluation.metrics import gender_balanced_accuracy, gender_precision_recall_f1
 from src.losses.multitask_loss import compute_multitask_loss
 from src.models.multitask_model import MultiTaskFaceModel
 from src.training.callbacks import EarlyStopping
 from src.training.checkpointing import BestMetricTracker, save_checkpoint
 from src.training.optim import build_param_groups, build_warmup_cosine_scheduler
+from src.training.progress import emit, format_epoch_report, format_stage_announcement
 from src.training.stages import Stage, build_stage_plan
+from src.utils.provenance import dependency_versions, git_commit_sha
 from src.utils.seed import seed_worker
 
 logger = logging.getLogger(__name__)
@@ -185,6 +188,7 @@ class Trainer:
 
         self.history: dict[str, list[float]] = {
             "train_loss": [], "val_loss": [], "val_age_mae": [], "val_age_rmse": [], "val_gender_accuracy": [],
+            "val_gender_balanced_accuracy": [], "val_gender_f1": [],
             "val_gender_selective_accuracy": [], "val_gender_coverage": [], "val_gender_abstention": [],
             "age_loss": [], "gender_loss": [], "effective_age_weight": [], "effective_gender_weight": [],
             "log_var_age": [], "log_var_gender": [], "lr": [], "epoch_time_seconds": [],
@@ -196,6 +200,12 @@ class Trainer:
             "gender_accuracy": BestMetricTracker(mode="max"),
             "balanced_score": BestMetricTracker(mode="max"),
         }
+        # Last checkpoint path written for *any* tracked metric this run --
+        # a live progress line's "checkpoint:" field, not the multi-file
+        # per-metric bookkeeping the trackers themselves already do.
+        self._last_checkpoint_path: Path | None = None
+        self.run_manifest_path = self.log_dir / f"{experiment_name}_run_manifest.json"
+        self.last_checkpoint_path = self.checkpoint_dir / f"{experiment_name}_last.pt"
 
     def _loss_mode(self) -> str:
         return self.config["model"]["loss_balancing"]["mode"]
@@ -213,6 +223,7 @@ class Trainer:
         gender_correct, gender_total = 0, 0
         gender_correct_accepted, gender_total_accepted = 0, 0
         gender_confidences = []
+        gender_true_labels, gender_pred_labels = [], []
         any_optimizer_step = False
 
         loss_cfg = self.config["model"]["loss_balancing"]
@@ -295,11 +306,27 @@ class Trainer:
                         gender_correct_accepted += (correct & accepted).sum().item()
                         gender_total_accepted += int(accepted.sum().item())
                         gender_confidences.append(confidence.detach().cpu())
+                        gender_true_labels.append(gender_target[valid].detach().cpu())
+                        gender_pred_labels.append(preds.detach().cpu())
 
         gender_abstention_value = float("nan")
         if gender_confidences:
             all_confidence = torch.cat(gender_confidences)
             gender_abstention_value = float((all_confidence < self.confidence_threshold).float().mean().item())
+
+        # Balanced accuracy / F1 (raw argmax, full coverage -- never
+        # confidence-thresholded) let a live progress line show class-
+        # imbalance-robust performance alongside raw/selective accuracy
+        # without a separate evaluation pass; "n/a" (not 0.0) when no
+        # gender-label batches occurred this epoch or a class is entirely
+        # absent (see src.evaluation.metrics for the exact semantics).
+        gender_balanced_acc_value = float("nan")
+        gender_f1_value = float("nan")
+        if gender_true_labels:
+            y_true = torch.cat(gender_true_labels).numpy()
+            y_pred = torch.cat(gender_pred_labels).numpy()
+            gender_balanced_acc_value = gender_balanced_accuracy(y_true, y_pred)
+            gender_f1_value = gender_precision_recall_f1(y_true, y_pred)["f1"]
 
         metrics = {
             "loss": total_loss / max(1, n_batches),
@@ -312,6 +339,8 @@ class Trainer:
             "age_mae": float(torch.cat(age_abs_errors).mean()) if age_abs_errors else float("nan"),
             "age_rmse": float(torch.sqrt((torch.cat(age_abs_errors) ** 2).mean())) if age_abs_errors else float("nan"),
             "gender_accuracy": gender_correct / max(1, gender_total) if gender_total else float("nan"),
+            "gender_balanced_accuracy": gender_balanced_acc_value,
+            "gender_f1": gender_f1_value,
             "gender_selective_accuracy": (
                 gender_correct_accepted / max(1, gender_total_accepted) if gender_total_accepted else float("nan")
             ),
@@ -361,8 +390,8 @@ class Trainer:
             f"trainable_params={trainable_params:,}/{total_params:,} | "
             "checkpoint_selection=balanced_score (also tracked: age_mae, gender_accuracy)"
         )
-        print(start_line, flush=True)
-        logger.info(start_line)
+        emit(start_line)
+        self._write_run_manifest(stages, seed_display, trainable_params, total_params)
 
         loss_cfg = self.config["model"]["loss_balancing"]
         if loss_cfg["mode"] == "learned_uncertainty":
@@ -373,8 +402,7 @@ class Trainer:
                     f"training with equal fixed weights for the first {warmup_epochs} epoch(s) "
                     "before switching to learned homoscedastic-uncertainty weighting."
                 )
-                print(warmup_line, flush=True)
-                logger.info(warmup_line)
+                emit(warmup_line)
 
         differential_lr_cfg = self.training_cfg.get("differential_lr", {})
         if differential_lr_cfg.get("enabled", False):
@@ -383,15 +411,12 @@ class Trainer:
                 f"backbone_lr_multiplier={differential_lr_cfg.get('backbone_lr_multiplier', 0.1)} "
                 "(backbone trains at a fraction of the stage LR; adapters/heads use the full stage LR)."
             )
-            print(diff_lr_line, flush=True)
-            logger.info(diff_lr_line)
+            emit(diff_lr_line)
 
         global_epoch = 0
         for stage in stages:
-            stage_line = f"=== {stage.name} (epochs={stage.epochs}, lr={stage.lr:.2e}) ==="
-            print(stage_line, flush=True)
-            logger.info(stage_line)
             self.model.set_stage_trainable(stage.freeze_backbone, stage.unfreeze_layers)
+            emit(format_stage_announcement(self.experiment_name, seed_display, stage.name, self.model))
             optimizer = _build_optimizer(
                 self.model, stage.lr, self.training_cfg.get("weight_decay", 0.05), differential_lr_cfg,
             )
@@ -404,6 +429,14 @@ class Trainer:
             # not validation total loss -- so the two never disagree.
             early_stopping = EarlyStopping(
                 patience=self.training_cfg.get("early_stopping_patience", 8), mode=self.SELECTION_MODE,
+            )
+            lr_groups = (
+                {
+                    "backbone": stage.lr * differential_lr_cfg.get("backbone_lr_multiplier", 0.1) if not stage.freeze_backbone else None,
+                    "adapters_heads": stage.lr,
+                }
+                if differential_lr_cfg.get("enabled", False)
+                else {"all": stage.lr}
             )
 
             for _ in range(stage.epochs):
@@ -422,6 +455,8 @@ class Trainer:
                 self.history["val_age_mae"].append(val_metrics["age_mae"])
                 self.history["val_age_rmse"].append(val_metrics["age_rmse"])
                 self.history["val_gender_accuracy"].append(val_metrics["gender_accuracy"])
+                self.history["val_gender_balanced_accuracy"].append(val_metrics["gender_balanced_accuracy"])
+                self.history["val_gender_f1"].append(val_metrics["gender_f1"])
                 self.history["val_gender_selective_accuracy"].append(val_metrics["gender_selective_accuracy"])
                 self.history["val_gender_coverage"].append(val_metrics["gender_coverage"])
                 self.history["val_gender_abstention"].append(val_metrics["gender_abstention"])
@@ -438,24 +473,24 @@ class Trainer:
                 self._maybe_checkpoint("age_mae", val_metrics["age_mae"], global_epoch, val_metrics)
                 self._maybe_checkpoint("gender_accuracy", val_metrics["gender_accuracy"], global_epoch, val_metrics)
                 is_best_balanced = self._maybe_checkpoint("balanced_score", balanced, global_epoch, val_metrics)
+                balanced_tracker = self.trackers["balanced_score"]
 
-                epoch_line = (
-                    f"[{self.experiment_name} | seed={seed_display}] "
-                    f"Epoch {global_epoch:02d}/{total_epochs_planned} | {elapsed:.1f}s | lr={current_lr:.5f} | "
-                    f"train_total={train_metrics['loss']:.4f} train_age={train_metrics['age_loss']:.4f} "
-                    f"train_gender={train_metrics['gender_loss']:.4f} | "
-                    f"val_total={val_metrics['loss']:.4f} val_age_mae={val_metrics['age_mae']:.3f} "
-                    f"val_age_rmse={val_metrics['age_rmse']:.3f} | "
-                    f"val_gender_selective_acc={val_metrics['gender_selective_accuracy']:.3f} "
-                    f"val_coverage={val_metrics['gender_coverage']:.3f} val_abstention={val_metrics['gender_abstention']:.3f} | "
-                    f"selection_score={balanced:.4f} | best={'yes' if is_best_balanced else 'no'} | "
-                    f"early_stop={early_stopping.num_bad_epochs}/{early_stopping.patience}"
+                emit(
+                    format_epoch_report(
+                        experiment_name=self.experiment_name, seed=seed_display, stage_name=stage.name,
+                        epoch=global_epoch, total_epochs=total_epochs_planned,
+                        train_metrics=train_metrics, val_metrics=val_metrics, lr_groups=lr_groups,
+                        selection_score=balanced, is_best=is_best_balanced,
+                        best_score=balanced_tracker.best_value, best_epoch=balanced_tracker.best_epoch,
+                        early_stopping_bad_epochs=early_stopping.num_bad_epochs,
+                        early_stopping_patience=early_stopping.patience, epoch_seconds=elapsed,
+                        checkpoint_path=self._last_checkpoint_path,
+                    )
                 )
-                print(epoch_line, flush=True)
-                logger.info(epoch_line)
 
                 self._write_incremental_history()
                 self._write_status_atomic(stage.name, global_epoch, total_epochs_planned, early_stopping)
+                self._write_last_checkpoint(stage.name, global_epoch, val_metrics)
 
                 # Early stopping on the centralized selection score (higher is
                 # better), skipping epochs whose score is NaN (a task absent
@@ -464,18 +499,17 @@ class Trainer:
                     continue
                 if early_stopping.step(balanced):
                     stop_line = f"[{self.experiment_name} | seed={seed_display}] Early stopping triggered at epoch {global_epoch}"
-                    print(stop_line, flush=True)
-                    logger.info(stop_line)
+                    emit(stop_line)
                     break
 
         best_line = (
             f"[{self.experiment_name} | seed={seed_display}] Training complete | "
             f"best scores: {{'age_mae': {self.trackers['age_mae'].best_value}, "
             f"'gender_accuracy': {self.trackers['gender_accuracy'].best_value}, "
-            f"'balanced_score': {self.trackers['balanced_score'].best_value}}}"
+            f"'balanced_score': {self.trackers['balanced_score'].best_value}}} | "
+            f"last checkpoint: {self._last_checkpoint_path}"
         )
-        print(best_line, flush=True)
-        logger.info(best_line)
+        emit(best_line)
 
         return {"history": self.history, "epoch_times": self.epoch_times}
 
@@ -483,11 +517,64 @@ class Trainer:
         if value != value:  # NaN, task absent this run
             return False
         tracker = self.trackers[metric_name]
-        improved = tracker.update(value)
+        improved = tracker.update(value, epoch)
         if improved:
             path = self.checkpoint_dir / f"{self.experiment_name}_best_{metric_name}.pt"
             save_checkpoint(path, self.model, None, epoch, metrics, self.config)
+            self._last_checkpoint_path = path
         return improved
+
+    def _write_run_manifest(self, stages: list[Stage], seed_display, trainable_params: int, total_params: int) -> None:
+        """Written once, at the start of training -- static run metadata
+        (never overwritten per-epoch, unlike status.json/history.*), so a
+        notebook status-table scan can identify which experiment/seed/config
+        a run directory belongs to without waiting for it to finish."""
+        manifest = {
+            "experiment_name": self.experiment_name,
+            "seed": seed_display,
+            "device": self.device,
+            "train_samples": self.train_dataset_size,
+            "val_samples": self.val_dataset_size,
+            "trainable_params": trainable_params,
+            "total_params": total_params,
+            "stages": [
+                {"name": s.name, "epochs": s.epochs, "lr": s.lr, "freeze_backbone": s.freeze_backbone}
+                for s in stages
+            ],
+            "total_epochs_planned": sum(s.epochs for s in stages),
+            "checkpoint_selection_metric": self.SELECTION_METRIC,
+            "git_commit_sha": git_commit_sha(),
+            "dependency_versions": dependency_versions(),
+            "started_at_utc": datetime.datetime.utcnow().isoformat() + "Z",
+        }
+        tmp_path = self.run_manifest_path.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2, default=str)
+        tmp_path.replace(self.run_manifest_path)
+
+    def _write_last_checkpoint(self, stage_name: str, epoch: int, val_metrics: dict) -> None:
+        """Atomically overwrite a single ``*_last.pt`` after every epoch --
+        a live progress/safety artifact (the most recent model state), kept
+        deliberately separate from the per-metric ``_best_*.pt`` files this
+        class already writes. Unlike the transfer-learning trainer's
+        ``last.pt``, this does not carry optimizer/scheduler state and is
+        not wired into a resume path -- the core Trainer has no
+        epoch-level resume today (see docs/notebooks.md "Stage-level
+        restart-safety"); this exists so a notebook status scan always has
+        *some* current-state checkpoint to point at while a run is in
+        progress, even before the first metric improvement is seen."""
+        payload = {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": None,
+            "epoch": epoch,
+            "stage": stage_name,
+            "metrics": val_metrics,
+            "config": self.config,
+            "extra": {"family": "core", "experiment_name": self.experiment_name},
+        }
+        tmp_path = self.last_checkpoint_path.with_suffix(self.last_checkpoint_path.suffix + ".tmp")
+        torch.save(payload, tmp_path)
+        tmp_path.replace(self.last_checkpoint_path)
 
     def _write_incremental_history(self) -> None:
         """Rewrite history.csv/json after every epoch (not just at the end of
