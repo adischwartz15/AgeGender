@@ -37,6 +37,7 @@ from src.evaluation.metrics import (
     median_interval_width, select_interval_examples,
 )
 from src.evaluation.predictions import export_predictions
+from src.evaluation.selective import full_coverage_gender_report, gender_selective_prediction_report
 from src.inference.artifacts import load_model_checkpoint
 from src.utils.config import REPO_ROOT, resolve_device
 from src.utils.io import checkpoint_experiment_name, file_sha256, save_json
@@ -137,6 +138,17 @@ def compute_parametric_metrics(preds: dict, confidence_threshold: float, calibra
             "gender_f1": prf["f1"],
             "gender_roc_auc": gender_roc_auc(y_true_gender, probs[:, 1]),
         })
+        # Full selective-prediction report (raw argmax accuracy, effective
+        # accuracy, risk-coverage curve, AURC) at the configured confidence
+        # threshold -- evaluation-only, from these exact probabilities, never
+        # a retrained model. See src/evaluation/selective.py.
+        metrics["gender_selective_report"] = gender_selective_prediction_report(
+            y_true_gender, probs, confidence_threshold=confidence_threshold,
+        )
+        # The "no abstention" point: the identical checkpoint/probabilities
+        # at confidence_threshold=0.0 (every prediction accepted), never a
+        # separate ablation_no_abstention training run.
+        metrics["gender_full_coverage_report"] = full_coverage_gender_report(y_true_gender, probs)
 
     return metrics
 

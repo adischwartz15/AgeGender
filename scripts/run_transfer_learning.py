@@ -73,6 +73,50 @@ logger = get_logger("scripts.run_transfer_learning")
 VOLO_EXPERIMENT_NAME = "volo_d1_face_only_pretrained"
 DEFAULT_LOCAL_ROOT = REPO_ROOT / "checkpoints" / "transfer_learning"
 
+# Model-family registry: generalizes this script across the VOLO-D1
+# extension and the pretrained-ResNet bridge baselines (T3, final-run
+# hardening) without duplicating the persistence/resume/Table-B machinery
+# below -- only the small model-specific bits (which config file, which
+# config sub-key, which builder function, how to label the row in Table B)
+# vary by family. "volo" is the default everywhere a --model-family isn't
+# passed, so existing behavior/tests are unaffected by this generalization.
+_MODEL_FAMILIES: dict[str, dict] = {
+    "volo": {
+        "experiment_name": VOLO_EXPERIMENT_NAME,
+        "config_file": "transfer_learning.yaml",
+        "model_config_key": "volo",
+        "backbone_label": "volo_d1_224 (timm)",
+        "input_size_label": 224,
+        "category_label": "supplementary (transfer learning)",
+    },
+    "pretrained_resnet18": {
+        "experiment_name": "pretrained_resnet18_face_only",
+        "config_file": "pretrained_resnet18.yaml",
+        "model_config_key": "pretrained_resnet",
+        "backbone_label": "resnet18 (torchvision, ImageNet-pretrained)",
+        "input_size_label": 224,
+        "category_label": "supplementary (pretraining bridge baseline)",
+    },
+    "pretrained_resnet50": {
+        "experiment_name": "pretrained_resnet50_face_only",
+        "config_file": "pretrained_resnet50.yaml",
+        "model_config_key": "pretrained_resnet",
+        "backbone_label": "resnet50 (torchvision, ImageNet-pretrained)",
+        "input_size_label": 224,
+        "category_label": "supplementary (pretraining + architecture + capacity, NOT pretraining-isolated)",
+    },
+}
+
+
+def _build_model_for_family(family: str, config: dict):
+    if family == "volo":
+        from src.models.pretrained_volo import build_pretrained_volo_model
+
+        return build_pretrained_volo_model(config)
+    from src.models.pretrained_resnet import build_pretrained_resnet_model
+
+    return build_pretrained_resnet_model(config)
+
 
 def _local_root(storage_root: str | None) -> Path:
     return Path(storage_root) if storage_root else DEFAULT_LOCAL_ROOT
@@ -96,13 +140,14 @@ def refresh_summary_archive(args: argparse.Namespace, extra_files: list[Path] | 
     import os
     import shutil
 
-    experiment_root = _local_root(args.storage_root) / VOLO_EXPERIMENT_NAME
+    experiment_name = _MODEL_FAMILIES[args.model_family]["experiment_name"]
+    experiment_root = _local_root(args.storage_root) / experiment_name
     archive_path = build_summary_archive(
         experiment_root, experiment_root / "transfer_learning_summary.zip", extra_files=extra_files,
     )
     persistent_root = _persistent_root(args.persistent_root)
     if persistent_root is not None:
-        dest = persistent_root / VOLO_EXPERIMENT_NAME / "transfer_learning_summary.zip"
+        dest = persistent_root / experiment_name / "transfer_learning_summary.zip"
         dest.parent.mkdir(parents=True, exist_ok=True)
         tmp_dest = dest.with_suffix(dest.suffix + ".tmp")
         shutil.copy2(archive_path, tmp_dest)
@@ -110,8 +155,10 @@ def refresh_summary_archive(args: argparse.Namespace, extra_files: list[Path] | 
     return archive_path
 
 
-def load_transfer_learning_config(seed: int, smoke: bool = False, overrides: dict | None = None) -> dict:
-    """Merge default -> data -> model -> training -> transfer_learning.yaml, then
+def load_transfer_learning_config(
+    seed: int, smoke: bool = False, overrides: dict | None = None, family: str = "volo",
+) -> dict:
+    """Merge default -> data -> model -> training -> <family's config file>, then
     (if ``smoke``) the ``transfer_learning_smoke`` block on top, then ``overrides``.
 
     ``load_config()`` applies ``.env``-derived overrides (e.g. a
@@ -121,20 +168,21 @@ def load_transfer_learning_config(seed: int, smoke: bool = False, overrides: dic
     silently redirect this experiment's isolated
     ``checkpoints/transfer_learning``/``results/transfer_learning`` paths
     back into the shared core ``checkpoints/``/``outputs/`` directories.
-    This function re-asserts ``configs/transfer_learning.yaml``'s own
-    ``paths`` block *after* ``load_config()`` returns, so those two paths
-    are never influenced by an unrelated ``.env`` file.
+    This function re-asserts the family config file's own ``paths`` block
+    *after* ``load_config()`` returns, so those two paths are never
+    influenced by an unrelated ``.env`` file.
     """
-    transfer_learning_yaml = _load_yaml(CONFIG_DIR / "transfer_learning.yaml")
+    config_filename = _MODEL_FAMILIES[family]["config_file"]
+    family_yaml = _load_yaml(CONFIG_DIR / config_filename)
     merged = load_config(
         CONFIG_DIR / "data.yaml", CONFIG_DIR / "model.yaml", CONFIG_DIR / "training.yaml",
-        CONFIG_DIR / "transfer_learning.yaml",
+        CONFIG_DIR / config_filename,
     )
     if smoke:
         merged = _deep_merge(merged, merged.get("transfer_learning_smoke", {}))
-        merged = _deep_merge(merged, {"paths": transfer_learning_yaml.get("transfer_learning_smoke", {}).get("paths", {})})
+        merged = _deep_merge(merged, {"paths": family_yaml.get("transfer_learning_smoke", {}).get("paths", {})})
     else:
-        merged = _deep_merge(merged, {"paths": transfer_learning_yaml.get("paths", {})})
+        merged = _deep_merge(merged, {"paths": family_yaml.get("paths", {})})
     merged = _deep_merge(merged, {"seed": seed, "training": {"seed": seed}})
     if overrides:
         merged = _deep_merge(merged, overrides)
@@ -143,24 +191,24 @@ def load_transfer_learning_config(seed: int, smoke: bool = False, overrides: dic
 
 
 
-def train_and_evaluate_volo_smoke() -> dict | None:
+def train_and_evaluate_volo_smoke(family: str = "volo") -> dict | None:
     """The tiny, non-scientific ``--smoke`` profile: single seed, no
     persistence layer, no resume -- a fast CPU pipeline check, not a
     resumable long-running experiment (see ``transfer_learning_smoke`` in
-    ``configs/transfer_learning.yaml``)."""
+    the family's config file)."""
     import pandas as pd
 
     from src.data.dataset import build_datasets
-    from src.models.pretrained_volo import build_pretrained_volo_model
     from src.training.transfer_trainer import TransferTrainer
 
+    experiment_name = _MODEL_FAMILIES[family]["experiment_name"]
     seed = 42
-    run_name = f"{VOLO_EXPERIMENT_NAME}_smoke"
+    run_name = f"{experiment_name}_smoke"
     checkpoint_dir = REPO_ROOT / "checkpoints" / "transfer_learning" / "_smoke"
-    output_dir = REPO_ROOT / "results" / "transfer_learning" / VOLO_EXPERIMENT_NAME / "_smoke"
+    output_dir = REPO_ROOT / "results" / "transfer_learning" / experiment_name / "_smoke"
 
     config = load_transfer_learning_config(
-        seed, smoke=True,
+        seed, smoke=True, family=family,
         overrides={"paths": {"checkpoint_dir": str(checkpoint_dir), "output_dir": str(output_dir)}},
     )
     set_global_seed(seed)
@@ -171,7 +219,7 @@ def train_and_evaluate_volo_smoke() -> dict | None:
         return None
 
     df = pd.read_csv(splits_path)
-    model = build_pretrained_volo_model(config)
+    model = _build_model_for_family(family, config)
     train_transform, eval_transform = model.build_transforms()
     datasets = build_datasets(df, train_transform, eval_transform)
 
@@ -190,7 +238,9 @@ def train_and_evaluate_volo_smoke() -> dict | None:
 
 
 def run_volo_seed(seed: int, args: argparse.Namespace) -> dict | None:
-    """Train (if needed) and evaluate one VOLO seed, honoring
+    """Train (if needed) and evaluate one seed of ``args.model_family``
+    (VOLO-D1, or a pretrained-ResNet bridge baseline -- see
+    ``_MODEL_FAMILIES``), honoring
     ``--resume``/``--skip-completed``/``--evaluate-only``/``--persistent-root``.
 
     Returns the real test-set metrics dict (never fabricated), or ``None``
@@ -200,29 +250,32 @@ def run_volo_seed(seed: int, args: argparse.Namespace) -> dict | None:
     import pandas as pd
 
     from src.data.dataset import build_datasets
-    from src.models.pretrained_volo import build_pretrained_volo_model
     from src.training.transfer_trainer import TransferTrainer
 
-    run_name = f"{VOLO_EXPERIMENT_NAME}_seed{seed}"
+    family = args.model_family
+    family_info = _MODEL_FAMILIES[family]
+    experiment_name = family_info["experiment_name"]
+    run_name = f"{experiment_name}_seed{seed}"
     # Legacy flat paths -- TransferTrainer still writes its own
     # {run_name}_best_{metric}.pt files here (unchanged, for
     # evaluate.py/inference backward compatibility); the
     # PersistentArtifactManager below additionally maintains the isolated,
     # resumable seed_<seed>/ tree these paths do not.
     legacy_checkpoint_dir = REPO_ROOT / "checkpoints" / "transfer_learning" / f"seed_{seed}"
-    legacy_output_dir = REPO_ROOT / "results" / "transfer_learning" / VOLO_EXPERIMENT_NAME / f"seed_{seed}"
+    legacy_output_dir = REPO_ROOT / "results" / "transfer_learning" / experiment_name / f"seed_{seed}"
 
     config = load_transfer_learning_config(
-        seed, smoke=False,
+        seed, smoke=False, family=family,
         overrides={"paths": {"checkpoint_dir": str(legacy_checkpoint_dir), "output_dir": str(legacy_output_dir)}},
     )
-    model_id = config["model"]["volo"]["model_id"]
-    pretrained_source = config["model"]["volo"]["pretrained_source"]
+    model_config = config["model"][family_info["model_config_key"]]
+    model_id = model_config["model_id"]
+    pretrained_source = model_config["pretrained_source"]
     split_sha256 = _split_sha256()
     git_sha = git_commit_sha()
 
     manager = PersistentArtifactManager(
-        VOLO_EXPERIMENT_NAME, seed, local_root=_local_root(args.storage_root),
+        experiment_name, seed, local_root=_local_root(args.storage_root),
         persistent_root=_persistent_root(args.persistent_root), sync_after_epoch=args.sync_after_epoch,
     )
     if _persistent_root(args.persistent_root) is not None:
@@ -271,7 +324,7 @@ def run_volo_seed(seed: int, args: argparse.Namespace) -> dict | None:
 
     set_global_seed(seed)
     df = pd.read_csv(splits_path)
-    model = build_pretrained_volo_model(config)
+    model = _build_model_for_family(family, config)
     train_transform, eval_transform = model.build_transforms()
     datasets = build_datasets(df, train_transform, eval_transform)
 
@@ -390,10 +443,11 @@ def print_seed_status(seeds: list[int], args: argparse.Namespace) -> None:
     Mirrors the status cells in both notebooks' persistence sections."""
     from src.training.persistent_artifacts import format_status_line, seed_status_report
 
+    experiment_name = _MODEL_FAMILIES[args.model_family]["experiment_name"]
     split_sha256 = _split_sha256()
     for seed in seeds:
         status = seed_status_report(
-            VOLO_EXPERIMENT_NAME, seed, _local_root(args.storage_root), _persistent_root(args.persistent_root),
+            experiment_name, seed, _local_root(args.storage_root), _persistent_root(args.persistent_root),
             expected_split_sha256=split_sha256,
         )
         logger.info(format_status_line(status))
@@ -401,9 +455,15 @@ def print_seed_status(seeds: list[int], args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--seeds", default="42,123,2026", help="Comma-separated seeds for VOLO + baseline")
+    parser.add_argument("--seeds", default="42,123,2026", help="Comma-separated seeds for the pretrained model + baseline")
+    parser.add_argument(
+        "--model-family", choices=sorted(_MODEL_FAMILIES), default="volo",
+        help="Which supplementary pretrained model to run: 'volo' (VOLO-D1, default), "
+             "'pretrained_resnet18' (required bridge baseline), or 'pretrained_resnet50' (optional, "
+             "combined pretraining+architecture+capacity comparison -- never described as isolating pretraining)",
+    )
     parser.add_argument("--baseline-experiment", default="exp_d_shared_adapters_learned_balance")
-    parser.add_argument("--only", choices=["volo", "baseline", "both"], default="both")
+    parser.add_argument("--only", choices=["volo", "baseline", "both"], default="both", help="'volo' here means the selected --model-family, kept for CLI backward compatibility")
     parser.add_argument(
         "--evaluate-only", action="store_true",
         help="Never train -- evaluate/reuse existing checkpoints only, then rebuild Table B",
@@ -427,24 +487,25 @@ def main() -> int:
         help="Persistent mirror root (e.g. a mounted Google Drive folder or /kaggle/working)",
     )
     args = parser.parse_args()
+    family_info = _MODEL_FAMILIES[args.model_family]
 
     if args.smoke:
         if args.only in ("volo", "both"):
-            train_and_evaluate_volo_smoke()
+            train_and_evaluate_volo_smoke(family=args.model_family)
         logger.info("--smoke run complete (non-scientific; not written to Table B/table_b_manifest.json).")
         return 0
 
     seeds = [int(s.strip()) for s in args.seeds.split(",")]
     print_seed_status(seeds, args)
 
-    volo_metrics_by_seed: dict[int, dict] = {}
+    pretrained_metrics_by_seed: dict[int, dict] = {}
     baseline_metrics_by_seed: dict[int, dict] = {}
 
     if args.only in ("volo", "both"):
         for seed in seeds:
             metrics = run_volo_seed(seed, args)
             if metrics is not None:
-                volo_metrics_by_seed[seed] = metrics
+                pretrained_metrics_by_seed[seed] = metrics
 
     if args.only in ("baseline", "both"):
         for seed in seeds:
@@ -452,18 +513,19 @@ def main() -> int:
             if metrics is not None:
                 baseline_metrics_by_seed[seed] = metrics
 
-    volo_metrics_per_seed = list(volo_metrics_by_seed.values())
+    pretrained_metrics_per_seed = list(pretrained_metrics_by_seed.values())
     baseline_metrics_per_seed = list(baseline_metrics_by_seed.values())
-    missing_volo_seeds = [s for s in seeds if s not in volo_metrics_by_seed]
+    missing_pretrained_seeds = [s for s in seeds if s not in pretrained_metrics_by_seed]
     missing_baseline_seeds = [s for s in seeds if s not in baseline_metrics_by_seed]
 
-    if len(seeds) < 3 or len(volo_metrics_per_seed) < 2 or len(baseline_metrics_per_seed) < 2:
+    if len(seeds) < 3 or len(pretrained_metrics_per_seed) < 2 or len(baseline_metrics_per_seed) < 2:
         logger.warning(
             "Table B will be reported as single-seed (no variance estimate): "
-            "volo_seeds=%d baseline_seeds=%d of %d requested. missing_volo_seeds=%s missing_baseline_seeds=%s "
-            "-- a missing baseline/VOLO seed is reported explicitly, never silently substituted with another seed's result.",
-            len(volo_metrics_per_seed), len(baseline_metrics_per_seed), len(seeds),
-            missing_volo_seeds, missing_baseline_seeds,
+            "%s_seeds=%d baseline_seeds=%d of %d requested. missing_%s_seeds=%s missing_baseline_seeds=%s "
+            "-- a missing baseline/pretrained-model seed is reported explicitly, never silently substituted "
+            "with another seed's result.",
+            args.model_family, len(pretrained_metrics_per_seed), len(baseline_metrics_per_seed), len(seeds),
+            args.model_family, missing_pretrained_seeds, missing_baseline_seeds,
         )
 
     rows = []
@@ -481,20 +543,22 @@ def main() -> int:
             input_size=128, param_breakdown=param_breakdown, metrics_per_seed=baseline_metrics_per_seed,
         ))
 
-    if volo_metrics_per_seed:
-        volo_seeds_with_metrics = list(volo_metrics_by_seed)
-        volo_breakdown_path = (
-            REPO_ROOT / "checkpoints" / "transfer_learning" / f"seed_{volo_seeds_with_metrics[0]}"
-            / f"{VOLO_EXPERIMENT_NAME}_seed{volo_seeds_with_metrics[0]}_parameter_breakdown.json"
+    if pretrained_metrics_per_seed:
+        experiment_name = family_info["experiment_name"]
+        pretrained_seeds_with_metrics = list(pretrained_metrics_by_seed)
+        pretrained_breakdown_path = (
+            REPO_ROOT / "checkpoints" / "transfer_learning" / f"seed_{pretrained_seeds_with_metrics[0]}"
+            / f"{experiment_name}_seed{pretrained_seeds_with_metrics[0]}_parameter_breakdown.json"
         )
         from src.utils.io import load_json
 
-        param_breakdown = load_json(volo_breakdown_path) if volo_breakdown_path.exists() else {}
+        param_breakdown = load_json(pretrained_breakdown_path) if pretrained_breakdown_path.exists() else {}
         rows.append(_assemble_row(
-            model_label=VOLO_EXPERIMENT_NAME, category="supplementary (transfer learning)",
-            initialization="ImageNet pretrained", backbone="volo_d1_224 (timm)", adapters="shared_adapters (reused)",
-            loss_balancing="learned_uncertainty (reused)", input_size=224,
-            param_breakdown=param_breakdown, metrics_per_seed=volo_metrics_per_seed,
+            model_label=experiment_name, category=family_info["category_label"],
+            initialization="ImageNet pretrained", backbone=family_info["backbone_label"],
+            adapters="shared_adapters (reused)", loss_balancing="learned_uncertainty (reused)",
+            input_size=family_info["input_size_label"],
+            param_breakdown=param_breakdown, metrics_per_seed=pretrained_metrics_per_seed,
         ))
 
     table_b = build_transfer_learning_table(rows)
@@ -507,7 +571,7 @@ def main() -> int:
     # retraining anything, and records exactly which seed contributed which
     # row so a missing seed is never silently blended into another's slot.
     seed_metrics_index = {
-        str(seed): {"volo": volo_metrics_by_seed.get(seed), "baseline": baseline_metrics_by_seed.get(seed)}
+        str(seed): {"volo": pretrained_metrics_by_seed.get(seed), "baseline": baseline_metrics_by_seed.get(seed)}
         for seed in seeds
     }
     _atomic_save_json(seed_metrics_index, output_dir / "seed_metrics_index.json")
@@ -515,11 +579,16 @@ def main() -> int:
     split_path = REPO_ROOT / "data" / "splits" / "full_metadata_with_splits.csv"
     manifest = {
         "seeds_requested": seeds,
-        "volo_seeds_completed": sorted(volo_metrics_by_seed),
+        "model_family": args.model_family,
+        # "volo_*" key names are kept for on-disk/notebook backward
+        # compatibility regardless of --model-family (the default and by
+        # far the most common case); "model_family" above disambiguates
+        # which pretrained model these counts actually refer to.
+        "volo_seeds_completed": sorted(pretrained_metrics_by_seed),
         "baseline_seeds_completed": sorted(baseline_metrics_by_seed),
-        "missing_volo_seeds": missing_volo_seeds,
+        "missing_volo_seeds": missing_pretrained_seeds,
         "missing_baseline_seeds": missing_baseline_seeds,
-        "single_seed_no_variance_estimate": len(volo_metrics_per_seed) < 2 or len(baseline_metrics_per_seed) < 2,
+        "single_seed_no_variance_estimate": len(pretrained_metrics_per_seed) < 2 or len(baseline_metrics_per_seed) < 2,
         "git_commit_sha": git_commit_sha(),
         "dependency_versions": dependency_versions(),
         "split_sha256": file_sha256(split_path) if split_path.exists() else None,

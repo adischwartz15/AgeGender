@@ -21,6 +21,15 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.evaluation.metrics import (
+    gender_accuracy,
+    gender_balanced_accuracy,
+    gender_coverage,
+    gender_effective_accuracy,
+    gender_precision_recall_f1,
+    gender_roc_auc,
+)
+
 
 def selective_risk_coverage_curve(
     confidence_scores: np.ndarray, per_sample_loss: np.ndarray, n_points: int = 100,
@@ -57,6 +66,63 @@ def risk_at_coverage(coverages: np.ndarray, risks: np.ndarray, target_coverage: 
     """Linearly interpolate the risk at an arbitrary target coverage level."""
     order = np.argsort(coverages)
     return float(np.interp(target_coverage, coverages[order], risks[order]))
+
+
+def gender_selective_prediction_report(
+    y_true: np.ndarray, probs: np.ndarray, confidence_threshold: float = 0.80, n_risk_coverage_points: int = 20,
+) -> dict:
+    """The full evaluation-time selective-prediction report for gender-label
+    predictions, from the SAME probabilities (i.e. the same already-trained
+    checkpoint's already-computed softmax outputs) at a chosen confidence
+    threshold -- this function never trains or re-runs inference, it only
+    varies how those existing probabilities are thresholded/summarized.
+
+    Abstention here is exactly what it says: an evaluation-time policy
+    applied to a fixed model's confidence, not a separate model. The
+    ``confidence_threshold=0.0`` case (every prediction accepted, i.e. "no
+    abstention") is simply the full-coverage point of this same report --
+    ``coverage == 1.0``, ``selective_accuracy == raw_argmax_accuracy ==
+    effective_accuracy`` -- never a second training run with abstention
+    "disabled". See :func:`full_coverage_gender_report` for that point
+    computed directly.
+
+    Reuses the project's existing metric primitives
+    (``src/evaluation/metrics.py``) rather than re-deriving any of them;
+    this function only assembles them into one report and adds the
+    risk-coverage curve / AURC summary via :func:`selective_risk_coverage_curve`
+    / :func:`compute_aurc`.
+    """
+    predicted = probs.argmax(axis=1)
+    confidence = probs.max(axis=1)
+    abstain_mask = confidence < confidence_threshold
+    prf = gender_precision_recall_f1(y_true, predicted)
+
+    per_sample_error = (predicted != y_true).astype(float)
+    coverages, risks = selective_risk_coverage_curve(confidence, per_sample_error, n_points=n_risk_coverage_points)
+    aurc = compute_aurc(coverages, risks)
+
+    return {
+        "confidence_threshold": confidence_threshold,
+        "raw_argmax_accuracy": gender_accuracy(y_true, predicted),  # no abstain_mask -- every sample scored
+        "balanced_accuracy": gender_balanced_accuracy(y_true, predicted),
+        "precision": prf["precision"], "recall": prf["recall"], "f1": prf["f1"],
+        "roc_auc": gender_roc_auc(y_true, probs[:, 1]) if probs.shape[1] > 1 else None,
+        "selective_accuracy": gender_accuracy(y_true, predicted, abstain_mask),
+        "coverage": gender_coverage(abstain_mask),
+        "abstention_rate": float(np.mean(abstain_mask)),
+        "effective_accuracy": gender_effective_accuracy(y_true, predicted, abstain_mask),
+        "aurc": aurc,
+        "risk_coverage_curve": {"coverages": coverages.tolist(), "risks": risks.tolist()},
+    }
+
+
+def full_coverage_gender_report(y_true: np.ndarray, probs: np.ndarray, n_risk_coverage_points: int = 20) -> dict:
+    """The full-coverage ("no abstention") point of :func:`gender_selective_prediction_report`
+    -- confidence_threshold=0.0 accepts every prediction, so
+    ``selective_accuracy == raw_argmax_accuracy == effective_accuracy`` and
+    ``coverage == 1.0``, all from the identical checkpoint/probabilities as
+    any other threshold's report, never a retrained model."""
+    return gender_selective_prediction_report(y_true, probs, confidence_threshold=0.0, n_risk_coverage_points=n_risk_coverage_points)
 
 
 def paired_bootstrap_risk_diff_ci(

@@ -30,7 +30,7 @@ from src.training.persistent_artifacts import (  # noqa: E402
 def _args(**overrides) -> argparse.Namespace:
     defaults = dict(
         storage_root=None, persistent_root=None, sync_after_epoch=False,
-        resume=False, skip_completed=False, evaluate_only=False,
+        resume=False, skip_completed=False, evaluate_only=False, model_family="volo",
     )
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
