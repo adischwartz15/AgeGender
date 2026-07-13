@@ -10,8 +10,12 @@ subject's images cross a split boundary) when subject_id is available.
 Default behavior: if a valid locked split already exists (its manifest's
 recorded split-CSV SHA-256 matches the file's actual current content),
 verify it and reuse it -- this script becomes a no-op printing the existing
-counts. Pass --force-resplit to intentionally replace it; the previous
-split and manifest are backed up (never deleted) first.
+counts. Pass --force-resplit to intentionally replace it. Whenever an
+existing split is about to be overwritten -- an explicit --force-resplit,
+or an existing split/manifest that fails validation (missing, corrupted,
+or tampered) -- the previous split and manifest are backed up (copied,
+never deleted) to data/splits/.backup/pre_regenerate_<UTC-timestamp>/
+first.
 
 Usage:
     python scripts/lock_split.py                    # create if missing, else verify+reuse
@@ -94,16 +98,19 @@ def existing_split_is_valid(splits_dir: Path) -> bool:
 
 
 def backup_existing_split(splits_dir: Path) -> Path | None:
-    """Move (never delete) the current split CSV + manifest into a
-    timestamped backup subdirectory before regenerating. Returns the backup
-    directory, or None if there was nothing to back up."""
+    """Copy (never delete) the current split CSV + manifest into a
+    timestamped backup subdirectory before regenerating -- called both for
+    an explicit --force-resplit and whenever an existing split/manifest
+    fails validation (missing, corrupted, or tampered), since either way a
+    split is about to be overwritten. Returns the backup directory, or None
+    if there was nothing on disk to back up."""
     split_path = splits_dir / SPLIT_FILENAME
     manifest_path = splits_dir / MANIFEST_FILENAME
     if not split_path.exists() and not manifest_path.exists():
         return None
 
     timestamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup_dir = splits_dir / ".backup" / f"pre_force_resplit_{timestamp}"
+    backup_dir = splits_dir / ".backup" / f"pre_regenerate_{timestamp}"
     backup_dir.mkdir(parents=True, exist_ok=True)
     if split_path.exists():
         shutil.copy2(split_path, backup_dir / SPLIT_FILENAME)
@@ -141,8 +148,13 @@ def main() -> int:
         print(f"Split counts: {manifest.get('split_counts')}")
         return 0
 
-    if args.force_resplit:
-        backup_existing_split(splits_dir)
+    # Back up whatever is currently on disk before regenerating -- whether
+    # this is an explicit --force-resplit, or the existing split/manifest
+    # failed validation (missing, corrupted, or tampered): either way, a
+    # split is about to be overwritten, and the previous one must never be
+    # silently discarded. backup_existing_split() is a no-op (returns None)
+    # if there is genuinely nothing on disk yet.
+    backup_existing_split(splits_dir)
 
     logger.info("Loading metadata (source=%s)", config["dataset"]["source"])
     df = load_metadata(config)

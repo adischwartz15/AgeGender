@@ -80,8 +80,11 @@ python scripts/lock_split.py --force-resplit  # back up the existing split, then
   it and does nothing further; every downstream script that reads the split
   records this same hash, so a report can prove which exact split every
   number came from. Regenerating requires the explicit `--force-resplit`
-  flag, which **backs up** (never deletes) the previous split to
-  `data/splits/.backup/pre_force_resplit_<UTC-timestamp>/` first.
+  flag, **or** happens automatically if the existing split/manifest fails
+  validation (missing, corrupted, or tampered) -- either way, the previous
+  split is always **backed up first** (copied, never deleted) to
+  `data/splits/.backup/pre_regenerate_<UTC-timestamp>/` before anything is
+  overwritten.
 - **Atomic.** The split CSV and manifest are written to a `.tmp` path and
   `os.replace()`d into place -- a crash mid-write can never leave a
   half-written split on disk.

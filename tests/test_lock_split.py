@@ -146,6 +146,33 @@ def test_main_force_resplit_backs_up_and_regenerates(lock_split_env, monkeypatch
     assert (splits_dir / ls.SPLIT_FILENAME).exists()  # new split still present
 
 
+def test_main_backs_up_invalid_split_before_regenerating_without_force_flag(lock_split_env, monkeypatch):
+    """A corrupted/tampered existing split must be backed up before being
+    overwritten even without --force-resplit -- regenerating is not
+    optional once validation fails, but silently discarding the previous
+    (still potentially informative, e.g. for a diff) split is never
+    acceptable either."""
+    argv, splits_dir = lock_split_env
+    splits_dir.mkdir(parents=True, exist_ok=True)
+    (splits_dir / ls.SPLIT_FILENAME).write_text("image_path,split\ntampered.jpg,train\n", encoding="utf-8")
+    from src.utils.io import save_json
+
+    save_json({"split_csv_sha256": "not-the-real-hash"}, splits_dir / ls.MANIFEST_FILENAME)
+    assert ls.existing_split_is_valid(splits_dir) is False
+
+    monkeypatch.setattr(sys, "argv", argv)  # no --force-resplit
+    rc = ls.main()
+    assert rc == 0
+
+    backup_root = splits_dir / ".backup"
+    assert backup_root.exists()
+    backups = list(backup_root.iterdir())
+    assert len(backups) == 1
+    backed_up_csv = (backups[0] / ls.SPLIT_FILENAME).read_text(encoding="utf-8")
+    assert "tampered.jpg" in backed_up_csv  # the invalid split's actual content, preserved
+    assert ls.existing_split_is_valid(splits_dir) is True  # freshly regenerated split is valid
+
+
 def test_main_skip_near_duplicate_audit_flag(lock_split_env, monkeypatch):
     argv, splits_dir = lock_split_env
     monkeypatch.setattr(sys, "argv", argv + ["--skip-near-duplicate-audit"])
