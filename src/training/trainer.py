@@ -17,6 +17,7 @@ from src.losses.multitask_loss import compute_multitask_loss
 from src.models.multitask_model import MultiTaskFaceModel
 from src.training.callbacks import EarlyStopping
 from src.training.checkpointing import BestMetricTracker, save_checkpoint
+from src.training.optim import build_param_groups, build_warmup_cosine_scheduler
 from src.training.stages import Stage, build_stage_plan
 from src.utils.seed import seed_worker
 
@@ -39,44 +40,35 @@ def _build_optimizer(
     training.differential_lr``.
     """
     differential_lr_cfg = differential_lr_cfg or {}
+
     if not differential_lr_cfg.get("enabled", False):
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        return torch.optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
+        def lr_for(_name, _param):
+            return lr
+    else:
+        multiplier = differential_lr_cfg.get("backbone_lr_multiplier", 0.1)
+        backbone_param_ids = {id(p) for p in model.backbone_parameters()}
 
-    multiplier = differential_lr_cfg.get("backbone_lr_multiplier", 0.1)
-    backbone_param_ids = {id(p) for p in model.backbone_parameters()}
-    backbone_params = [p for p in model.parameters() if p.requires_grad and id(p) in backbone_param_ids]
-    other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
+        def lr_for(_name, param):
+            return lr * multiplier if id(param) in backbone_param_ids else lr
 
-    param_groups = []
-    if backbone_params:
-        param_groups.append({"params": backbone_params, "lr": lr * multiplier})
-    if other_params:
-        param_groups.append({"params": other_params, "lr": lr})
-    return torch.optim.AdamW(param_groups, weight_decay=weight_decay)
+    # build_param_groups applies zero weight decay to biases, normalization
+    # parameters, and the scalar log-variance loss-balancing parameters
+    # (ndim <= 1), and decays only the >= 2-D conv/linear weight tensors --
+    # see src/training/optim.py. It also asserts every trainable parameter
+    # lands in exactly one group.
+    groups = build_param_groups(model.named_parameters(), lr_for, weight_decay)
+    return torch.optim.AdamW(groups)
 
 
-def _build_scheduler(optimizer: torch.optim.Optimizer, total_epochs: int, warmup_epochs: int):
-    """Linear warmup for ``warmup_epochs``, then cosine annealing to ~0 for the rest.
-
-    Built from ``torch.optim.lr_scheduler``'s own composable
-    ``LinearLR`` + ``CosineAnnealingLR`` (combined via ``SequentialLR``)
-    rather than a hand-rolled ``LambdaLR`` -- the same warmup-then-cosine
-    shape, expressed with the library's own scheduler classes so it also
-    correctly scales every parameter group's own base LR (needed now that
-    ``_build_optimizer`` can produce more than one group).
-    """
-    warmup_epochs = max(0, min(warmup_epochs, max(0, total_epochs - 1)))
-    cosine_epochs = max(1, total_epochs - warmup_epochs)
-
-    if warmup_epochs == 0:
-        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_epochs)
-
-    warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=1.0 / warmup_epochs, end_factor=1.0, total_iters=warmup_epochs,
-    )
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_epochs)
-    return torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+def _build_scheduler(
+    optimizer: torch.optim.Optimizer, total_epochs: int, warmup_epochs: int, warmup_start_factor: float = 0.1,
+):
+    """Linear warmup then cosine annealing (see
+    :func:`src.training.optim.build_warmup_cosine_scheduler`). Thin wrapper
+    kept for the import in ``src/training/transfer_trainer.py``; the real
+    warmup fix (an explicit ``warmup_start_factor`` instead of the old
+    ``1.0 / warmup_epochs``) lives in the shared utility."""
+    return build_warmup_cosine_scheduler(optimizer, total_epochs, warmup_epochs, warmup_start_factor)
 
 
 def resolve_loss_balancing(loss_cfg: dict, current_epoch: int) -> tuple[str, dict]:
@@ -160,10 +152,18 @@ class Trainer:
         # (without it, workers can otherwise end up sharing correlated RNG
         # state inherited from the parent process).
         pin_memory = device == "cuda"
+        # Explicit seeded generator for the shuffled train loader, so the
+        # per-epoch batch ordering is reproducible across runs/resumes (not
+        # left to the global RNG state at DataLoader-construction time). The
+        # seed is recorded in the run manifest by the caller.
+        self.dataloader_seed = int(self.training_cfg.get("seed", self.config.get("seed", 42)))
+        self.train_generator = torch.Generator()
+        self.train_generator.manual_seed(self.dataloader_seed)
         self.train_loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
             drop_last=len(train_dataset) > batch_size, pin_memory=pin_memory,
             worker_init_fn=seed_worker if num_workers > 0 else None,
+            generator=self.train_generator,
         )
         self.val_loader = DataLoader(
             val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -380,7 +380,10 @@ class Trainer:
             optimizer = _build_optimizer(
                 self.model, stage.lr, self.training_cfg.get("weight_decay", 0.05), differential_lr_cfg,
             )
-            scheduler = _build_scheduler(optimizer, stage.epochs, self.training_cfg["scheduler"].get("warmup_epochs", 1))
+            scheduler = _build_scheduler(
+                optimizer, stage.epochs, self.training_cfg["scheduler"].get("warmup_epochs", 1),
+                self.training_cfg["scheduler"].get("warmup_start_factor", 0.1),
+            )
             early_stopping = EarlyStopping(patience=self.training_cfg.get("early_stopping_patience", 8), mode="min")
 
             for _ in range(stage.epochs):

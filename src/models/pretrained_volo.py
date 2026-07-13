@@ -408,26 +408,40 @@ class PretrainedVOLOFaceOnlyMultiTask(nn.Module):
     ) -> list[dict]:
         """Separate optimizer param groups for backbone / adapters / heads / balancing params.
 
-        Only includes a group if it has at least one trainable parameter
-        (e.g. the backbone group is omitted entirely while fully frozen in
-        Stage 1), mirroring the empty-group-skipping convention already
-        used by ``src/training/trainer.py::_build_optimizer``.
+        Each component keeps its own learning rate, but within every
+        component biases and normalization parameters (and the scalar
+        log-variance loss-balancing parameters) receive **zero** weight
+        decay -- only ``>= 2``-D conv/linear weight tensors decay (see
+        ``src/training/optim.py::is_no_decay_param``). Only includes a group
+        if it has at least one trainable parameter (e.g. the backbone group
+        is omitted entirely while fully frozen in Stage 1). Asserts every
+        trainable parameter lands in exactly one group.
         """
-        groups = []
+        from src.training.optim import build_param_groups
 
-        def _add(params, lr):
-            trainable = [p for p in params if p.requires_grad]
-            if trainable:
-                groups.append({"params": trainable, "lr": lr, "weight_decay": weight_decay})
-
-        _add(self.backbone.parameters(), backbone_lr)
-        _add(list(self.age_adapter.parameters()) + list(self.gender_adapter.parameters()), adapter_lr)
-        _add(list(self.age_head.parameters()) + list(self.gender_head.parameters()), head_lr)
+        # Assign each trainable parameter its component learning rate by
+        # identity; build_param_groups then further splits each component
+        # into decay / no-decay sub-groups.
+        adapter_ids = {id(p) for p in self.age_adapter.parameters()} | {id(p) for p in self.gender_adapter.parameters()}
+        head_ids = {id(p) for p in self.age_head.parameters()} | {id(p) for p in self.gender_head.parameters()}
+        balance_ids = set()
         if self.log_var_age is not None:
-            _add([self.log_var_age, self.log_var_gender], balance_lr)
-        if not groups:
-            raise InvalidStageTransitionError("get_parameter_groups() produced zero trainable parameter groups.")
-        return groups
+            balance_ids = {id(self.log_var_age), id(self.log_var_gender)}
+
+        def lr_for(_name, param):
+            pid = id(param)
+            if pid in adapter_ids:
+                return adapter_lr
+            if pid in head_ids:
+                return head_lr
+            if pid in balance_ids:
+                return balance_lr
+            return backbone_lr
+
+        try:
+            return build_param_groups(self.named_parameters(), lr_for, weight_decay)
+        except ValueError as exc:
+            raise InvalidStageTransitionError(str(exc)) from exc
 
     # -- introspection ------------------------------------------------------------
 

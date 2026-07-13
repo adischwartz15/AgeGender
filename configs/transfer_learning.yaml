@@ -67,7 +67,11 @@ training:
   loss_balance_lr: 3.0e-4
   backbone_lr: 3.0e-5
   scheduler:
-    warmup_epochs: 1
+    # Real warmup (see configs/training.yaml and src/training/optim.py):
+    # LR rises from warmup_start_factor * base_lr to base_lr over
+    # warmup_epochs, never starting at the full base LR.
+    warmup_epochs: 2
+    warmup_start_factor: 0.1
 
 paths:
   checkpoint_dir: ./checkpoints/transfer_learning/volo_d1_face_only_pretrained

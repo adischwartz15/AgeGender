@@ -44,7 +44,13 @@ training:
 
   scheduler:
     name: cosine
-    warmup_epochs: 1
+    # Real warmup: the LR starts at warmup_start_factor * base_lr and rises
+    # linearly to base_lr over warmup_epochs, then cosine-anneals. Raised
+    # 1 -> 2 epochs and an explicit 0.1 start factor because a single warmup
+    # epoch with the old 1/warmup_epochs start factor gave a factor of 1.0
+    # (i.e. no warmup at all). See src/training/optim.py.
+    warmup_epochs: 2
+    warmup_start_factor: 0.1
 
   stages:
     stage_a:

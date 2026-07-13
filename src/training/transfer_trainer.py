@@ -204,10 +204,17 @@ class TransferTrainer:
         batch_size = self.training_cfg.get("batch_size", 16)
         num_workers = self.training_cfg.get("num_workers", 2)
         pin_memory = device == "cuda"
+        # Explicit seeded generator for reproducible shuffled-batch ordering
+        # (see src/training/trainer.py for the same treatment in the core
+        # trainer).
+        self.dataloader_seed = int(self.training_cfg.get("seed", config.get("seed", 42)))
+        self.train_generator = torch.Generator()
+        self.train_generator.manual_seed(self.dataloader_seed)
         self.train_loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
             drop_last=len(train_dataset) > batch_size, pin_memory=pin_memory,
             worker_init_fn=seed_worker if num_workers > 0 else None,
+            generator=self.train_generator,
         )
         self.val_loader = DataLoader(
             val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -352,7 +359,8 @@ class TransferTrainer:
             torch.cuda.reset_peak_memory_stats(self.device)
 
         optimizer = self._build_optimizer(backbone_lr, adapter_lr, head_lr, balance_lr)
-        scheduler = _build_scheduler(optimizer, epochs, warmup_epochs)
+        warmup_start_factor = self.training_cfg.get("scheduler", {}).get("warmup_start_factor", 0.1)
+        scheduler = _build_scheduler(optimizer, epochs, warmup_epochs, warmup_start_factor)
         early_stopping = EarlyStopping(patience=early_stopping_patience, mode="min")
         if resume_optimizer_state is not None:
             optimizer.load_state_dict(resume_optimizer_state)

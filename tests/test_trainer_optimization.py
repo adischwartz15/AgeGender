@@ -77,27 +77,28 @@ def test_resolve_loss_balancing_uses_configured_fixed_weights_after_warmup():
 # _build_optimizer: differential learning rates
 # ---------------------------------------------------------------------------
 
-def test_build_optimizer_without_differential_lr_uses_a_single_param_group(tiny_config):
+def test_build_optimizer_without_differential_lr_puts_every_param_at_base_lr(tiny_config):
+    """Without differential LR, every trainable parameter uses the base LR.
+    (Group *count* is no longer 1 because build_param_groups now splits each
+    LR into decay / no-decay sub-groups -- see src/training/optim.py.)"""
     model = build_multitask_model(tiny_config)
     optimizer = _build_optimizer(model, lr=1e-3, weight_decay=0.05, differential_lr_cfg={"enabled": False})
-    assert len(optimizer.param_groups) == 1
-    assert optimizer.param_groups[0]["lr"] == 1e-3
+    assert {group["lr"] for group in optimizer.param_groups} == {1e-3}
 
 
-def test_build_optimizer_with_differential_lr_splits_backbone_and_head_groups(tiny_config):
+def test_build_optimizer_with_differential_lr_uses_two_distinct_lrs(tiny_config):
     model = build_multitask_model(tiny_config)
     optimizer = _build_optimizer(
         model, lr=1e-3, weight_decay=0.05,
         differential_lr_cfg={"enabled": True, "backbone_lr_multiplier": 0.1},
     )
-    assert len(optimizer.param_groups) == 2
-    lrs = sorted(group["lr"] for group in optimizer.param_groups)
-    assert lrs[0] == 1e-3 * 0.1  # backbone group
-    assert lrs[1] == 1e-3  # adapters/heads group
+    assert {group["lr"] for group in optimizer.param_groups} == {1e-3 * 0.1, 1e-3}
 
     backbone_param_ids = {id(p) for p in model.backbone_parameters()}
-    low_lr_group = next(g for g in optimizer.param_groups if g["lr"] == 1e-3 * 0.1)
-    assert all(id(p) in backbone_param_ids for p in low_lr_group["params"])
+    for group in optimizer.param_groups:
+        for p in group["params"]:
+            expected = 1e-3 * 0.1 if id(p) in backbone_param_ids else 1e-3
+            assert abs(group["lr"] - expected) < 1e-12
 
 
 def test_build_optimizer_differential_lr_covers_every_trainable_parameter_exactly_once(tiny_config):
@@ -112,15 +113,19 @@ def test_build_optimizer_differential_lr_covers_every_trainable_parameter_exactl
 
 def test_build_optimizer_differential_lr_respects_frozen_backbone(tiny_config):
     """When the backbone is fully frozen (requires_grad=False for all its
-    params), the differential-LR backbone group must simply be absent, not
-    an empty/error param group."""
+    params), no parameter uses the low backbone LR -- every remaining
+    trainable parameter is at the full base LR."""
     model = build_multitask_model(tiny_config)
     model.set_stage_trainable(freeze_backbone=True, unfreeze_layers=[])
     optimizer = _build_optimizer(
         model, lr=1e-3, weight_decay=0.05, differential_lr_cfg={"enabled": True, "backbone_lr_multiplier": 0.1},
     )
-    assert len(optimizer.param_groups) == 1
-    assert optimizer.param_groups[0]["lr"] == 1e-3
+    assert {group["lr"] for group in optimizer.param_groups} == {1e-3}
+    # And no frozen backbone parameter leaked into any group.
+    backbone_param_ids = {id(p) for p in model.backbone_parameters()}
+    grouped_ids = {id(p) for group in optimizer.param_groups for p in group["params"]}
+    trainable_backbone = {id(p) for p in model.backbone_parameters() if p.requires_grad}
+    assert grouped_ids & backbone_param_ids == trainable_backbone
 
 
 # ---------------------------------------------------------------------------
