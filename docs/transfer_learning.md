@@ -79,12 +79,37 @@ Selecting the extension without `timm` installed raises immediately with:
 `pip install -r requirements-transfer.txt`." -- never a silent fallback to
 random initialization.
 
+## Canonical seeds
+
+**42, 123, 2026** -- identical to the core suite's pre-registered protocol
+(`docs/final_evaluation_protocol.md`). Table B's VOLO row and baseline row
+are always drawn from the same requested seed set; if a baseline checkpoint
+is unavailable for a requested seed, that is reported explicitly
+(`missing_baseline_seeds` in `table_b_manifest.json`), never silently
+backfilled from a different seed.
+
 ## How to run it
 
 ```bash
-python scripts/run_transfer_learning.py --smoke                          # tiny, non-scientific CPU check
-python scripts/run_transfer_learning.py --seeds 42,43,44                 # full run (needs a GPU in practice)
-python scripts/run_transfer_learning.py --seeds 42,43,44 --evaluate-only # evaluate existing checkpoints only
+# Fresh full run (needs a GPU in practice)
+python scripts/run_transfer_learning.py --seeds 42,123,2026
+
+# Resume after a Colab/Kaggle disconnect or manual interruption: completed
+# seeds are reused, an interrupted seed resumes from its latest valid
+# checkpoint, a seed that never started trains from scratch.
+python scripts/run_transfer_learning.py --seeds 42,123,2026 \
+    --resume --skip-completed --sync-after-epoch \
+    --persistent-root /content/drive/MyDrive/AgeGender/transfer_learning
+
+# Evaluate only -- never trains; rebuilds Table B from existing checkpoints.
+python scripts/run_transfer_learning.py --seeds 42,123,2026 --evaluate-only
+
+# Single seed only (e.g. to finish just the one still-incomplete seed).
+python scripts/run_transfer_learning.py --seeds 123 --resume --skip-completed
+
+# tiny, non-scientific CPU pipeline check (no persistence layer, single seed)
+python scripts/run_transfer_learning.py --smoke
+
 python scripts/run_transfer_learning.py --only volo                      # skip the baseline row
 python scripts/run_transfer_learning.py --only baseline                  # skip VOLO, reuse the baseline row only
 ```
@@ -97,10 +122,172 @@ existing checkpoint is evaluated (never retrained) if not.
 ## Output paths
 
 ```
-checkpoints/transfer_learning/volo_d1_face_only_pretrained/seed_<seed>/...
-results/transfer_learning/volo_d1_face_only_pretrained/seed_<seed>/...
+checkpoints/transfer_learning/volo_d1_face_only_pretrained/seed_<seed>/...   # legacy flat per-metric checkpoints (evaluate.py/inference compatibility)
+checkpoints/transfer_learning/volo_d1_face_only_pretrained/                  # PersistentArtifactManager's isolated, resumable tree (see below)
+  seed_42/{checkpoints,state,metrics,predictions,plots,logs}/...
+  seed_123/...
+  seed_2026/...
+  transfer_learning_summary.zip           # lightweight archive (no checkpoints) -- rebuilt at seed/full-run completion
+results/transfer_learning/volo_d1_face_only_pretrained/seed_<seed>/...       # evaluate_checkpoint() output (plots, metrics)
 results/transfer_learning/table_b.csv
-results/transfer_learning/table_b_manifest.json   # git SHA, dependency versions, split fingerprint, seed count
+results/transfer_learning/table_b_manifest.json   # git SHA, dependency versions, split fingerprint, seed count, missing seeds
+results/transfer_learning/seed_metrics_index.json # per-seed VOLO/baseline metrics -- lets Table B rebuild without retraining
+```
+
+## Persistent artifacts
+
+Implemented by `src/training/persistent_artifacts.py::PersistentArtifactManager`
+-- a reusable, platform-agnostic persistence layer (two plain filesystem
+paths: a fast local working root and an optional persistent mirror root;
+Colab passes a mounted Drive folder, Kaggle passes `/kaggle/working`, unit
+tests pass two temp directories). Nothing platform-specific is scattered
+through the model or trainer code; `TransferTrainer` only calls
+`artifact_manager.on_epoch_end/on_new_best/on_stage_transition/on_seed_complete`.
+
+**Per-seed directory layout** (under either root):
+
+```
+seed_<seed>/
+|-- checkpoints/{last.pt, previous_last.pt, best.pt}
+|-- state/{trainer_state.json, run_manifest.json, completion.json, checkpoint_checksums.json}
+|-- metrics/{validation_history.json, test_metrics.json}
+|-- predictions/
+|-- plots/
+`-- logs/
+```
+
+**Checkpoint frequency.** Saved and (if `--sync-after-epoch`) mirrored:
+after every completed epoch, whenever a new best validation score is
+reached, immediately after the Stage 1 -> Stage 2 transition, and after
+each seed completes (final test evaluation + completion marker). Never
+per-batch. Losing the currently-running incomplete epoch on disconnect is
+acceptable; losing a previously completed epoch or seed is not.
+
+**Best vs. last.** `best.pt` is the highest-balanced-score checkpoint seen
+so far (what `evaluate.py`/inference load); `last.pt` is the most recent
+epoch's checkpoint, used to resume training. Before `last.pt` is replaced,
+the previous valid one is atomically rotated to `previous_last.pt` -- if
+`last.pt` is later found corrupted (bad checksum or a failed `torch.load`),
+resume automatically falls back to `previous_last.pt` with a logged
+warning, and raises `CorruptedCheckpointError` (never silently restarts
+from scratch) only if both are corrupted.
+
+**Atomic writes.** Every checkpoint/JSON write goes to a `.tmp` path first,
+is flushed/fsynced, then `os.replace()`d into place -- a crash mid-write
+can never leave a half-written file at the real path. `table_b.csv`/
+`table_b_manifest.json` use the same pattern, so a partial Table B is never
+observed mid-overwrite.
+
+**Checksums.** SHA-256 is computed immediately after every checkpoint write
+and recorded in `state/checkpoint_checksums.json`; resume validates the
+checksum before trusting a checkpoint.
+
+**Completion markers.** `state/completion.json` is written only after a
+seed's Stage 1 + Stage 2 + final test evaluation all succeed. A seed counts
+as complete only if *all* of: the marker's `status == "complete"`, its
+referenced best checkpoint exists, its checksum matches, test metrics are
+present, and (when checked) the split fingerprint and model
+identifier/pretrained source match the current run -- never from directory
+existence alone (`PersistentArtifactManager.is_seed_complete`).
+
+**Resumable checkpoint contents.** `last.pt`/`previous_last.pt` carry
+everything needed to resume byte-for-byte: model/optimizer/scheduler/AMP-
+scaler state, epoch/global step/training stage (Stage 1 vs. Stage 2 --
+restoring one never re-runs or skips the wrong stage), best validation
+metric, early-stopping state, full training history, seed, Python/NumPy/
+PyTorch(CPU+CUDA) RNG state, model identifier, pretrained source, resolved
+input size/transform config, split fingerprint, age/gender-head and adapter
+config, learned loss-balancing parameters, per-group learning rates, git
+commit SHA, and the full config snapshot.
+
+**Table B regeneration.** Rebuilt after every run (partial or complete)
+from `seed_metrics_index.json` -- `--evaluate-only --skip-completed`
+rebuilds it from saved metrics alone, without retraining anything. With
+fewer than 2 completed seeds per row, values render as `(n=1, no std)`;
+`table_b_manifest.json`'s `missing_volo_seeds`/`missing_baseline_seeds`
+record exactly which requested seeds are still outstanding.
+
+**Archive contents.** `transfer_learning_summary.zip` (rebuilt at
+seed-completion and full-run-completion, never per-epoch) bundles
+manifests, metrics, plots, configs, completion markers, and Table B --
+never checkpoints, dataset images, cache/temp files, or anything
+credential-shaped (`src/training/persistent_artifacts.py::build_summary_archive`).
+The Kaggle notebook additionally builds a fuller
+`agegender_transfer_learning_artifacts.zip` that also includes `best.pt`/
+`last.pt` (never `previous_last.pt`, a duplicate).
+
+**Secret handling.** Optional Kaggle -> Google Drive backup
+(`src/utils/kaggle_drive_backup.py`) reads `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON`
+and `GOOGLE_DRIVE_FOLDER_ID` only from Kaggle Secrets, holds the credential
+JSON only in memory (never writes it to disk), never logs or prints it, and
+fails soft (a warning, `/kaggle/working` still gets everything) on any
+missing secret, missing optional dependency, or network/API error.
+
+```bash
+pip install -r requirements-kaggle-drive.txt   # only if ENABLE_KAGGLE_DRIVE_BACKUP = True
+```
+
+To configure it: create a Google Cloud service account, share the target
+Drive folder with that service account's email address (Editor access), add
+the service account's JSON key as the Kaggle Secret
+`GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` and the target folder's ID as
+`GOOGLE_DRIVE_FOLDER_ID` (Kaggle notebook editor -> Add-ons -> Secrets), then
+set `ENABLE_KAGGLE_DRIVE_BACKUP = True` in the bootstrap cell.
+
+## Colab recovery
+
+After a runtime disconnect or restart:
+
+1. Reconnect the runtime.
+2. Rerun environment setup, repository checkout, and dependency
+   installation (sections 3-5 of `notebooks/train_evaluate_colab.ipynb`).
+3. Rerun the Drive-mount cell (section 6) and the "Persistent
+   Transfer-Learning Storage and Resume" bootstrap cell -- this restores
+   the newest valid checkpoint per seed from Drive into the local working
+   directory and prints each seed's status (`COMPLETE`/`INCOMPLETE`/`NOT
+   STARTED`).
+4. Rerun the Table B run cell. With `AUTO_RESUME = SKIP_COMPLETED =
+   SYNC_AFTER_EPOCH = True` (the defaults), this is equivalent to
+   `--resume --skip-completed --sync-after-epoch`.
+
+No other cell needs to be rerun -- the bootstrap cell reconstructs every
+path/config itself rather than depending on a variable from the dead kernel.
+
+## Kaggle recovery
+
+1. Restore from Drive backup (if `ENABLE_KAGGLE_DRIVE_BACKUP=True`) or, the
+   recommended path, attach a previous run's saved notebook output as an
+   input dataset: save this notebook's output as a version, then in a new
+   session, Add Data > Your Datasets/Notebooks > that version's output, and
+   set `KAGGLE_TRANSFER_LEARNING_INPUT_DATASET_DIR` in the bootstrap cell to
+   its mounted path (e.g. `/kaggle/input/<your-dataset-slug>`).
+2. Rerun the bootstrap cell -- this restores from the configured
+   `KAGGLE_RESTORE_SOURCE` (`"attached_dataset"`, `"drive"`,
+   `"working_directory"`, or `"auto"`), verifies checksums, and prints each
+   seed's status.
+3. Rerun the Table B run cell to resume the incomplete seed(s) and skip
+   completed ones.
+4. Save a new notebook version when done, so its `/kaggle/working` output
+   (including `agegender_transfer_learning_artifacts.zip`) becomes the next
+   session's attachable dataset.
+
+## Fresh clone / from-scratch commands
+
+```bash
+# fresh full run
+python scripts/run_transfer_learning.py --seeds 42,123,2026
+
+# resume run
+python scripts/run_transfer_learning.py --seeds 42,123,2026 --resume --skip-completed --sync-after-epoch
+
+# evaluate only (never trains)
+python scripts/run_transfer_learning.py --seeds 42,123,2026 --evaluate-only
+
+# single-seed run
+python scripts/run_transfer_learning.py --seeds 123 --resume --skip-completed
+
+# rebuild Table B without retraining anything
+python scripts/run_transfer_learning.py --seeds 42,123,2026 --evaluate-only --skip-completed
 ```
 
 ## Resource requirements

@@ -197,7 +197,9 @@ split.
 configs/transfer_learning.yaml       transfer_learning_extension profile + transfer_learning_smoke
 src/models/pretrained_volo.py        PretrainedVOLOFaceOnlyMultiTask (the VOLO wrapper)
 src/training/transfer_trainer.py     2-stage trainer (frozen backbone -> fine-tune)
-scripts/run_transfer_learning.py     orchestrates training/evaluation + builds Table B
+src/training/persistent_artifacts.py PersistentArtifactManager -- atomic, resumable, checksummed checkpoints
+src/utils/kaggle_drive_backup.py     optional, secure Kaggle -> Google Drive backup (Kaggle Secrets only)
+scripts/run_transfer_learning.py     orchestrates training/evaluation + builds Table B (--resume/--skip-completed)
 requirements-transfer.txt            optional `timm` dependency
 ```
 
@@ -223,20 +225,39 @@ gradient clipping, warmup+cosine, early stopping on validation only,
 best-checkpoint restoration, gradient accumulation, and AMP on CUDA (never
 on CPU). See `configs/transfer_learning.yaml` for the exact defaults.
 
-**How to run it.**
+**How to run it.** Canonical seeds are `42, 123, 2026` -- the same three
+seeds the core suite's pre-registered protocol uses
+(`docs/final_evaluation_protocol.md`), so Table B's VOLO row and baseline
+row are always drawn from the same requested seed set.
 
 ```bash
-python scripts/run_transfer_learning.py --smoke                     # tiny, non-scientific CPU integration check
-python scripts/run_transfer_learning.py --seeds 42,43,44            # full run (needs a CUDA GPU in practice)
-python scripts/run_transfer_learning.py --seeds 42,43,44 --evaluate-only  # evaluate already-trained checkpoints only
+python scripts/run_transfer_learning.py --smoke                            # tiny, non-scientific CPU integration check
+python scripts/run_transfer_learning.py --seeds 42,123,2026                # fresh full run (needs a CUDA GPU in practice)
+python scripts/run_transfer_learning.py --seeds 42,123,2026 \
+    --resume --skip-completed --sync-after-epoch                          # resume after a disconnect, skip finished seeds
+python scripts/run_transfer_learning.py --seeds 42,123,2026 --evaluate-only  # never trains -- rebuilds Table B from existing checkpoints only
 ```
 
 **Output paths.** Never the core suite's `checkpoints/` / `outputs/` /
 `experiments/` directories -- always
 `checkpoints/transfer_learning/volo_d1_face_only_pretrained/` and
 `results/transfer_learning/volo_d1_face_only_pretrained/`, plus
-`results/transfer_learning/table_b.csv` and `table_b_manifest.json` (git
-commit SHA, dependency versions, split fingerprint, seed count).
+`results/transfer_learning/table_b.csv`, `table_b_manifest.json`, and
+`seed_metrics_index.json` (git commit SHA, dependency versions, split
+fingerprint, per-seed metrics).
+
+**Persistence and resume.** A Colab/Kaggle runtime can disconnect mid-run
+without losing progress: every epoch's checkpoint is written atomically
+(temp file + `os.replace`), checksummed, and mirrored to a persistent root
+(a mounted Google Drive folder on Colab, `/kaggle/working` on Kaggle) via
+`src/training/persistent_artifacts.py::PersistentArtifactManager`. A seed
+is only ever treated as complete once its completion marker, checksum, test
+metrics, and split/model fingerprint all validate -- never from directory
+existence alone -- so `--skip-completed` never re-trains a finished seed
+and `--resume` never silently restarts an interrupted one from scratch. See
+[docs/transfer_learning.md](docs/transfer_learning.md) "Persistent
+artifacts", "Colab recovery", and "Kaggle recovery" for the full directory
+layout and exact recovery commands.
 
 **Resource requirements.** VOLO-D1 at 224px is far heavier than the core
 suite's 128px models. Default batch size is conservative (16, with gradient
