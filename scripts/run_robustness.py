@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.data.transforms import resolve_eval_transform
 from src.evaluation.calibration import compute_preprocessing_fingerprint, load_calibration, validate_calibration_artifact
 from src.evaluation.robustness import (
-    apply_corruption, build_robustness_diff_table, compute_degradation, evaluate_condition,
+    apply_corruption, build_robustness_diff_table, compute_degradation, corruption_summary, evaluate_condition,
     iter_corruption_configs, stratified_sample,
 )
 from src.inference.artifacts import load_model_checkpoint
@@ -185,7 +185,17 @@ def main() -> int:
         if pct_col in degraded_corrupted_only.columns and not degraded_corrupted_only.empty:
             plot_robustness_curves(degraded_corrupted_only, pct_col, output_dir / f"degradation_{metric}_pct_change.png")
 
+    # Programmatic corruption-type/condition count (never a hand-maintained
+    # doc claim that can silently drift from the actual configs/robustness.yaml).
+    corruption_stats = corruption_summary(robustness_cfg)
+    save_json(corruption_stats, output_dir / "corruption_summary.json")
+
     summary_lines = ["# Robustness Evaluation Summary\n"]
+    summary_lines.append(
+        f"**Corruption coverage:** {corruption_stats['n_corruption_types']} corruption types "
+        f"({', '.join(corruption_stats['corruption_type_names'])}), "
+        f"{corruption_stats['n_total_conditions']} total (type x severity) conditions.\n"
+    )
     clean_row = results_df[results_df["corruption"] == "clean"].iloc[0].to_dict()
     summary_lines.append(f"**Clean baseline:** {clean_row}\n")
     for corruption_name in results_df["corruption"].unique():

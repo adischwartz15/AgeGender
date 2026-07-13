@@ -178,13 +178,21 @@ _TABLE_B_COLUMNS = [
     ("input_size", "Input size"),
     ("age_mae", "Age MAE"),
     ("age_rmse", "Age RMSE"),
+    ("age_median_ae", "Age median AE"),
     ("age_cs5", "CS@5"),
-    ("gender_accuracy", "Gender acc"),
+    # Explicitly labelled "selective" (the confidence-thresholded accuracy,
+    # denominator = accepted predictions only) -- never called plain
+    # "accuracy", which this is not (see gender_balanced_accuracy below for
+    # the raw-argmax, full-coverage classification metric).
+    ("gender_accuracy", "Gender selective acc (tau=0.80)"),
+    ("gender_balanced_accuracy", "Gender balanced acc (raw, full coverage)"),
     ("gender_f1", "Gender F1"),
     ("total_params", "Params"),
     ("trainable_params", "Trainable params"),
 ]
-_TABLE_B_SEED_SENSITIVE_KEYS = ("age_mae", "age_rmse", "age_cs5", "gender_accuracy", "gender_f1")
+_TABLE_B_SEED_SENSITIVE_KEYS = (
+    "age_mae", "age_rmse", "age_median_ae", "age_cs5", "gender_accuracy", "gender_balanced_accuracy", "gender_f1",
+)
 
 
 def build_transfer_learning_table(rows: list[dict]) -> pd.DataFrame:

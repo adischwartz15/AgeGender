@@ -167,6 +167,26 @@ def iter_corruption_configs(robustness_cfg: dict):
             yield name, severity, param
 
 
+def corruption_summary(robustness_cfg: dict) -> dict:
+    """Programmatic corruption-count summary -- computed directly from
+    ``configs/robustness.yaml`` (never a hand-maintained doc claim like "11
+    corruptions" that can silently drift out of sync with the actual
+    config). Callers (``scripts/run_robustness.py``'s saved summary,
+    documentation generation) should read this instead of hardcoding a count.
+    """
+    corruption_names = sorted(robustness_cfg["corruptions"])
+    n_conditions = sum(1 for _ in iter_corruption_configs(robustness_cfg))
+    severities_per_type = {
+        name: len(spec["severities"]) for name, spec in robustness_cfg["corruptions"].items()
+    }
+    return {
+        "n_corruption_types": len(corruption_names),
+        "corruption_type_names": corruption_names,
+        "n_total_conditions": n_conditions,  # sum over types of (severities per type) -- not simply n_types * a fixed severity count if they differ
+        "severities_per_type": severities_per_type,
+    }
+
+
 def _predict_batch(model, images_tensor, device, gender_confidence_threshold: float):
     """Run one forward pass and return numpy prediction arrays for a batch of images."""
     import torch

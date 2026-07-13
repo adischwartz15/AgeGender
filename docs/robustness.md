@@ -18,11 +18,18 @@ python scripts/run_robustness.py --checkpoint <checkpoint>.pt \
 ```
 
 Evaluates the **full test split by default** (touched only for this, plus
-final evaluation -- never for training or model selection) under 11
-deterministic corruption types x 3 severities (`configs/robustness.yaml`,
-`src/evaluation/robustness.py`): Gaussian blur, Gaussian noise, low
-resolution (resize degradation), JPEG compression, low/high brightness,
-low/high contrast, grayscale conversion, partial occlusion, partial crop.
+final evaluation -- never for training or model selection) under the
+deterministic corruption types x severities defined in
+`configs/robustness.yaml` (currently 11 types x 3 severities = 33
+conditions -- Gaussian blur, Gaussian noise, low resolution/resize
+degradation, JPEG compression, low/high brightness, low/high contrast,
+grayscale conversion, partial occlusion, partial crop). This count is
+**never hand-maintained** -- every run computes and saves the actual count
+programmatically from the config to `corruption_summary.json`
+(`src/evaluation/robustness.py::corruption_summary`), and
+`robustness_summary.md`'s first line always states the real count for that
+run, so this document's number can never silently drift out of sync with
+`configs/robustness.yaml`.
 
 `--max-samples` deterministically **stratified-samples** by age bucket x
 gender label down to about that many rows for faster iteration, instead

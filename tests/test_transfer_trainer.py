@@ -147,6 +147,36 @@ def test_checkpoint_save_load_reproduces_outputs_within_tolerance(tmp_path, tiny
     assert torch.allclose(out_original["gender_logits"], out_reloaded["gender_logits"], atol=1e-5)
 
 
+def test_stage1_checkpoint_snapshot_saved_separately_from_overall_best(tmp_path, tiny_transfer_datasets):
+    """T7: the best Stage-1-only (frozen-backbone) checkpoint must be saved
+    as its own file, distinct from the overall best -- answers "how much
+    comes from the pretrained representation alone" without a second Stage-1
+    training run."""
+    from src.inference.artifacts import load_model_checkpoint
+
+    model, train_dataset, val_dataset = tiny_transfer_datasets
+    config = _tiny_transfer_config()
+    config["training"]["head_only_epochs"] = 2
+    checkpoint_dir = tmp_path / "checkpoints"
+    trainer = TransferTrainer(
+        model, config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=checkpoint_dir, experiment_name="volo_stage1_snapshot", output_dir=tmp_path / "output",
+    )
+    trainer.train()
+
+    stage1_path = checkpoint_dir / "volo_stage1_snapshot_best_stage1_frozen.pt"
+    assert stage1_path.exists()
+
+    reloaded_model, config, checkpoint = load_model_checkpoint(stage1_path, device="cpu")
+    assert checkpoint["extra"]["training_stage"] == STAGE_1_NAME
+    assert isinstance(reloaded_model, PretrainedVOLOFaceOnlyMultiTask)
+
+    # Distinct file from the overall best (which may reflect Stage 2).
+    overall_best_path = checkpoint_dir / "volo_stage1_snapshot_best_balanced_score.pt"
+    assert overall_best_path.exists()
+    assert stage1_path != overall_best_path
+
+
 def test_transfer_learning_smoke_config_runs_end_to_end(tmp_path, synthetic_metadata_df):
     """Exercises the *real* configs/transfer_learning.yaml
     transfer_learning_smoke profile (not a hand-rolled test dict), so a

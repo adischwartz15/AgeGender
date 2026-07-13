@@ -346,6 +346,23 @@ def run_volo_seed(seed: int, args: argparse.Namespace) -> dict | None:
             return None
 
     metrics = evaluate_checkpoint(str(best_checkpoint_path), output_name=f"{run_name}_test_metrics")
+
+    # Also evaluate the best Stage-1-only (frozen-backbone) checkpoint
+    # snapshot, if one was saved (see TransferTrainer._save_stage1_checkpoint_snapshot)
+    # -- answers "how much of the performance comes from the pretrained
+    # representation alone, before any fine-tuning?" without re-running
+    # Stage 1 in isolation. Best-effort: never fails the main run if this
+    # secondary evaluation has a problem.
+    stage1_checkpoint_path = legacy_checkpoint_dir / f"{run_name}_best_stage1_frozen.pt"
+    if stage1_checkpoint_path.exists():
+        try:
+            stage1_metrics = evaluate_checkpoint(str(stage1_checkpoint_path), output_name=f"{run_name}_stage1_test_metrics")
+            if stage1_metrics is not None:
+                manager.save_metrics("stage1_frozen_test_metrics", stage1_metrics)
+                logger.info("seed=%d: saved Stage-1-only (frozen backbone) test metrics separately.", seed)
+        except Exception:
+            logger.exception("seed=%d: Stage-1-only checkpoint evaluation failed (non-fatal).", seed)
+
     if metrics is not None:
         manager.save_metrics("test_metrics", metrics)
         completion = SeedCompletionInfo(
@@ -403,7 +420,7 @@ def _assemble_row(
     model_label: str, category: str, initialization: str, backbone: str, adapters: str, loss_balancing: str,
     input_size: int, param_breakdown: dict, metrics_per_seed: list[dict],
 ) -> dict:
-    keys = ("age_mae", "age_rmse", "age_cs5", "gender_accuracy", "gender_f1")
+    keys = ("age_mae", "age_rmse", "age_median_ae", "age_cs5", "gender_accuracy", "gender_balanced_accuracy", "gender_f1")
     aggregate = aggregate_seed_metrics(metrics_per_seed, keys=keys)
     row = {
         "model": model_label, "experiment_category": category, "initialization": initialization,

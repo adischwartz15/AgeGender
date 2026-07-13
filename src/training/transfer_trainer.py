@@ -25,6 +25,7 @@ import contextlib
 import copy
 import json
 import logging
+import os
 import time
 from pathlib import Path
 
@@ -581,6 +582,7 @@ class TransferTrainer:
             resume_scheduler_state=sched_state, resume_scaler_state=scaler_state,
             resume_early_stopping_state=es_state,
         )
+        self._save_stage1_checkpoint_snapshot()
         if self.artifact_manager is not None:
             transition_payload = self._build_checkpoint_payload(STAGE_2_NAME, 0, None, None, {})
             trainer_state = {
@@ -591,6 +593,40 @@ class TransferTrainer:
             }
             self.artifact_manager.on_stage_transition(transition_payload, trainer_state)
         return self._global_epoch
+
+    def _save_stage1_checkpoint_snapshot(self) -> None:
+        """Save the best Stage-1-only (frozen-backbone representation +
+        adapters/heads/loss-balancing) checkpoint as its own file, distinct
+        from the overall (possibly Stage-2-fine-tuned) best checkpoint --
+        this is what lets a later evaluation answer "how much of the
+        performance comes from the pretrained representation alone, before
+        any fine-tuning?" without needing to re-run Stage 1 in isolation.
+
+        Called at the exact moment Stage 1 finishes and before Stage 2
+        starts, so ``self._best_state_dict`` is guaranteed to hold only
+        Stage-1 epochs' weights (Stage 2 has not run yet) -- never the
+        current ``self.model`` weights, which are Stage 1's *last* epoch,
+        not necessarily its *best* one.
+        """
+        if self._best_state_dict is None:
+            return
+        path = self.checkpoint_dir / f"{self.experiment_name}_best_stage1_frozen.pt"
+        payload = {
+            "model_state_dict": self._best_state_dict,
+            "optimizer_state_dict": None,
+            "epoch": self._global_epoch,
+            "metrics": {"balanced_score": self._best_balanced_score},
+            "config": self.config,
+            "extra": {
+                "family": "pretrained_volo", "model_id": self.model.model_id,
+                "pretrained_source": self.model.pretrained_source, "training_stage": STAGE_1_NAME,
+            },
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        torch.save(payload, tmp_path)
+        os.replace(tmp_path, path)
+        logger.info("[%s] Saved best Stage-1-only checkpoint snapshot to %s", self.experiment_name, path)
 
     def run_stage_2(self) -> int:
         """Stage 2: unfreeze (full or last-N-stages, per config) and fine-tune

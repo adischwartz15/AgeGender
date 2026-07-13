@@ -184,3 +184,20 @@ def test_build_transfer_learning_table_missing_keys_render_as_none_not_fabricate
     del row_dict["gender_f1"]
     table = build_transfer_learning_table([row_dict])
     assert table.iloc[0]["Gender F1"] is None
+
+
+def test_table_b_labels_selective_accuracy_distinctly_from_balanced_accuracy():
+    """T7: gender selective accuracy (confidence-thresholded) must be
+    labelled distinctly from balanced accuracy (raw argmax, full coverage)
+    -- never presented as interchangeable "gender accuracy" columns."""
+    row_dict = _table_b_row("volo_d1_face_only_pretrained", n_seeds=1)
+    row_dict["gender_balanced_accuracy"] = 0.87
+    row_dict["gender_balanced_accuracy_std"] = None
+    row_dict["age_median_ae"] = 3.1
+    row_dict["age_median_ae_std"] = None
+    table = build_transfer_learning_table([row_dict])
+    columns = list(table.columns)
+    assert "Gender selective acc (tau=0.80)" in columns
+    assert "Gender balanced acc (raw, full coverage)" in columns
+    assert "Age median AE" in columns
+    assert columns.index("Gender selective acc (tau=0.80)") != columns.index("Gender balanced acc (raw, full coverage)")
