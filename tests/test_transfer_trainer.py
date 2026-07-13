@@ -8,6 +8,7 @@ installed. Uses the same synthetic (non-real) image fixtures as
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,8 @@ import torch  # noqa: E402
 from src.data.dataset import FaceMultiTaskDataset  # noqa: E402
 from src.data.split_utils import split_dataframe  # noqa: E402
 from src.models.pretrained_volo import PretrainedVOLOFaceOnlyMultiTask  # noqa: E402
-from src.training.transfer_trainer import TransferTrainer  # noqa: E402
+from src.training.persistent_artifacts import PersistentArtifactManager  # noqa: E402
+from src.training.transfer_trainer import STAGE_1_NAME, STAGE_2_NAME, TransferTrainer  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -215,3 +217,109 @@ def test_transfer_learning_paths_never_target_core_output_dirs(monkeypatch):
     smoke_config = load_transfer_learning_config(seed=42, smoke=True)
     assert smoke_config["paths"]["checkpoint_dir"].startswith("./checkpoints/transfer_learning")
     assert smoke_config["paths"]["output_dir"].startswith("./results/transfer_learning")
+
+
+# -- Persistence / resume ---------------------------------------------------------
+
+
+def test_checkpoint_payload_contains_full_resumable_state(tmp_path, tiny_transfer_datasets):
+    """Every epoch's checkpoint (via the artifact manager's last.pt) must
+    carry everything needed to resume byte-for-byte -- optimizer, scheduler,
+    AMP scaler, RNG state, stage, config snapshot, etc."""
+    model, train_dataset, val_dataset = tiny_transfer_datasets
+    manager = PersistentArtifactManager("volo_payload_test", seed=0, local_root=tmp_path / "artifacts")
+    trainer = TransferTrainer(
+        model, _tiny_transfer_config(), train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="volo_payload", output_dir=tmp_path / "output",
+        artifact_manager=manager, split_sha256="deadbeef", git_commit_sha="abc123",
+    )
+    trainer.run_stage_1()
+
+    payload = manager.find_latest_valid_checkpoint()
+    assert payload is not None
+    for key in (
+        "model_state_dict", "optimizer_state_dict", "scheduler_state_dict", "gradient_scaler_state_dict",
+        "epoch", "global_step", "training_stage", "best_validation_metric", "early_stopping_state",
+        "training_history", "seed", "rng_state", "model_id", "pretrained_source", "input_size",
+        "transform_config", "split_sha256", "age_head_config", "gender_head_config", "adapter_config",
+        "loss_balancing_params", "optimizer_group_lrs", "git_commit_sha", "config",
+    ):
+        assert key in payload, f"missing {key!r} in resumable checkpoint payload"
+    assert payload["split_sha256"] == "deadbeef"
+    assert payload["git_commit_sha"] == "abc123"
+    assert payload["model_id"] == model.model_id
+    assert payload["config"]["model"]["family"] == "pretrained_volo"
+
+
+def test_resume_mid_stage1_continues_from_saved_epoch_and_restores_optimizer_state(tmp_path, tiny_transfer_datasets):
+    model, train_dataset, val_dataset = tiny_transfer_datasets
+    full_config = _tiny_transfer_config()
+    full_config["training"]["head_only_epochs"] = 3
+
+    manager = PersistentArtifactManager("volo_resume_mid", seed=0, local_root=tmp_path / "artifacts")
+    trainer1 = TransferTrainer(
+        model, full_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints1", experiment_name="volo_resume_mid", output_dir=tmp_path / "output1",
+        artifact_manager=manager,
+    )
+    # Simulate a runtime disconnect after 2 of 3 Stage-1 epochs: call the
+    # private _run_stage directly with epochs=2 instead of run_stage_1(),
+    # so the Stage-1 -> Stage-2 transition hook (which only fires when
+    # run_stage_1() completes normally) never runs -- last.pt is left as a
+    # genuine mid-stage checkpoint, exactly like a killed process would.
+    model.freeze_backbone()
+    backbone_lr, adapter_lr, head_lr, balance_lr, warmup_epochs, patience = trainer1._stage_lrs()
+    trainer1._global_epoch = trainer1._run_stage(
+        STAGE_1_NAME, 2, backbone_lr, adapter_lr, head_lr, balance_lr, warmup_epochs, patience, global_epoch=0,
+    )
+    assert len(trainer1.history["train_loss"]) == 2
+
+    resume_payload = manager.find_latest_valid_checkpoint()
+    assert resume_payload["training_stage"] == STAGE_1_NAME
+    assert resume_payload["stage_epoch"] == 2
+    assert resume_payload["optimizer_state_dict"] is not None
+    assert resume_payload["scheduler_state_dict"] is not None
+
+    model2 = PretrainedVOLOFaceOnlyMultiTask(_tiny_transfer_config())
+    trainer2 = TransferTrainer(
+        model2, full_config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints2", experiment_name="volo_resume_mid", output_dir=tmp_path / "output2",
+        artifact_manager=manager, resume_state=resume_payload,
+    )
+    # Resumed history already has the 2 completed epochs before any new training runs.
+    assert len(trainer2.history["train_loss"]) == 2
+    assert torch.allclose(model2.log_var_age, model.log_var_age)
+    assert trainer2.scaler.state_dict() == resume_payload["gradient_scaler_state_dict"]
+
+    trainer2.run_stage_1()
+    # Only the 1 remaining stage-1 epoch (3 - 2) should have run.
+    assert len(trainer2.history["train_loss"]) == 3
+    assert all(stage == STAGE_1_NAME for stage in trainer2.history["stage"])
+
+
+def test_resume_from_stage2_checkpoint_skips_stage1(tmp_path, tiny_transfer_datasets):
+    model, train_dataset, val_dataset = tiny_transfer_datasets
+    config = _tiny_transfer_config()  # head_only_epochs=1 -> Stage 1 completes in a single epoch
+    manager = PersistentArtifactManager("volo_resume_stage2", seed=0, local_root=tmp_path / "artifacts")
+    trainer1 = TransferTrainer(
+        model, config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints1", experiment_name="volo_resume_stage2", output_dir=tmp_path / "output1",
+        artifact_manager=manager,
+    )
+    trainer1.run_stage_1()
+
+    resume_payload = manager.find_latest_valid_checkpoint()
+    assert resume_payload["training_stage"] == STAGE_2_NAME  # stage-transition marker
+    assert resume_payload["stage_epoch"] == 0
+
+    model2 = PretrainedVOLOFaceOnlyMultiTask(_tiny_transfer_config())
+    trainer2 = TransferTrainer(
+        model2, config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints2", experiment_name="volo_resume_stage2", output_dir=tmp_path / "output2",
+        resume_state=resume_payload,
+    )
+    history_len_before = len(trainer2.history["train_loss"])
+    trainer2.run_stage_1()
+    # Stage 1 must be a complete no-op: no new epochs, no re-freezing/retraining.
+    assert len(trainer2.history["train_loss"]) == history_len_before
+    assert trainer2._resume_stage is None

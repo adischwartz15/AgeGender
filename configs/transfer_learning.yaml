@@ -76,10 +76,50 @@ paths:
 # transfer_learning_extension run profile: the only two models compared in
 # Table B. Reuses exp_d_shared_adapters_learned_balance's already-trained
 # result (never retrains it) as the from-scratch baseline row.
+#
+# Seeds match the core suite's pre-registered protocol
+# (docs/final_evaluation_protocol.md) exactly -- 42, 123, 2026 -- so Table B
+# never silently compares a VOLO seed set against a differently-seeded
+# baseline set.
 transfer_learning:
   experiment_name: volo_d1_face_only_pretrained
   baseline_experiment: exp_d_shared_adapters_learned_balance
-  seeds: [42, 43, 44]
+  seeds: [42, 123, 2026]
+  auto_resume: true
+  skip_completed: true
+  sync_after_epoch: true
+  checkpoint_every_epochs: 1
+  preserve_previous_checkpoint: true
+  verify_checksums: true
+
+# Persistence layer (src/training/persistent_artifacts.py::PersistentArtifactManager).
+# local_root/persistent_root are left null here -- resolved at run time by
+# scripts/run_transfer_learning.py (--storage-root / --persistent-root, or
+# platform-specific defaults set by the Colab/Kaggle notebooks). Never
+# hardcode a platform path (e.g. /content/drive/...) in this shared config file.
+persistence:
+  backend: auto   # "auto" | "local" | "colab_drive" | "kaggle_working"
+  local_root: null
+  persistent_root: null
+  create_archive: true
+  archive_completed_seeds: true
+
+# Colab-specific defaults, used only by notebooks/train_evaluate_colab.ipynb's
+# persistence/resume section -- never read by scripts/run_transfer_learning.py
+# directly (it takes --persistent-root explicitly instead).
+colab:
+  drive_root: /content/drive/MyDrive/AgeGender/transfer_learning
+
+# Kaggle-specific defaults, used only by notebooks/train_evaluate_kaggle.ipynb's
+# persistence/resume section. enable_drive_backup requires
+# GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON + GOOGLE_DRIVE_FOLDER_ID in Kaggle
+# Secrets (see src/utils/kaggle_drive_backup.py) -- off by default since it
+# needs the user to have configured those secrets and shared the target
+# Drive folder with the service account.
+kaggle:
+  working_root: /kaggle/working/AgeGender/transfer_learning
+  enable_drive_backup: false
+  restore_source: auto   # "drive" | "attached_dataset" | "working_directory" | "auto"
 
 # transfer_learning_smoke: tiny, non-scientific config for a fast CPU
 # integration check -- a couple of synthetic-sized batches, one short epoch

@@ -35,6 +35,7 @@ from src.losses.multitask_loss import compute_multitask_loss
 from src.models.pretrained_volo import PretrainedVOLOFaceOnlyMultiTask
 from src.training.callbacks import EarlyStopping
 from src.training.checkpointing import BestMetricTracker, save_checkpoint
+from src.training.persistent_artifacts import PersistentArtifactManager, capture_rng_state, restore_rng_state
 from src.training.trainer import _build_scheduler, resolve_loss_balancing
 from src.utils.seed import seed_worker
 
@@ -43,6 +44,10 @@ logger = logging.getLogger(__name__)
 
 class InvalidStageTransitionError(RuntimeError):
     pass
+
+
+STAGE_1_NAME = "Stage 1: frozen backbone"
+STAGE_2_NAME = "Stage 2: fine-tune"
 
 
 def _run_epoch(
@@ -70,6 +75,7 @@ def _run_epoch(
     n_age_batches, n_gender_batches, n_batches = 0, 0, 0
     age_abs_errors = []
     gender_correct, gender_total = 0, 0
+    optimizer_steps = 0
 
     mode, fixed = resolve_loss_balancing(loss_cfg, current_epoch)
 
@@ -110,6 +116,7 @@ def _run_epoch(
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
+                optimizer_steps += 1
 
         total_loss += loss_out.total_loss.item()
         n_batches += 1
@@ -138,6 +145,7 @@ def _run_epoch(
         "gender_loss": total_gender_loss / max(1, n_gender_batches),
         "age_mae": float(torch.cat(age_abs_errors).mean()) if age_abs_errors else float("nan"),
         "gender_accuracy": gender_correct / max(1, gender_total) if gender_total else float("nan"),
+        "_optimizer_steps": optimizer_steps,
     }
 
 
@@ -164,6 +172,10 @@ class TransferTrainer:
         experiment_name: str = "volo_d1_face_only_pretrained",
         gender_class_weights: torch.Tensor | None = None,
         output_dir: str | Path | None = None,
+        artifact_manager: PersistentArtifactManager | None = None,
+        resume_state: dict | None = None,
+        git_commit_sha: str | None = None,
+        split_sha256: str | None = None,
     ) -> None:
         self.model = model.to(device)
         self.config = config
@@ -216,18 +228,124 @@ class TransferTrainer:
         self._best_state_dict: dict | None = None
         self._best_balanced_score: float | None = None
 
+        self.artifact_manager = artifact_manager
+        self.git_commit_sha = git_commit_sha
+        self.split_sha256 = split_sha256
+        self._global_epoch = 0
+        self._global_step = 0
+        self._resume_stage: str | None = None
+        self._resume_stage_epoch = 0
+        self._resume_optimizer_state: dict | None = None
+        self._resume_scheduler_state: dict | None = None
+        self._resume_scaler_state: dict | None = None
+        self._resume_early_stopping_state: dict | None = None
+        self._current_early_stopping_state: dict = {"best_value": None, "num_bad_epochs": 0, "should_stop": False}
+        if resume_state is not None:
+            self._apply_resume_state(resume_state)
+
+    def _apply_resume_state(self, state: dict) -> None:
+        """Restore in-memory trainer state from a checkpoint payload produced
+        by :meth:`_build_checkpoint_payload` (i.e. ``last.pt``/``previous_last.pt``
+        as loaded by ``PersistentArtifactManager.find_latest_valid_checkpoint``).
+
+        Distinguishes Stage 1 vs. Stage 2 resume via ``training_stage`` --
+        restoring a Stage 1 checkpoint must resume Stage 1 (never skip to
+        Stage 2), and restoring a Stage 2 checkpoint must never re-run
+        Stage 1 (see ``run_stage_1``/``run_stage_2`` below, which consume
+        ``self._resume_stage``)."""
+        if state.get("model_state_dict") is not None:
+            self.model.load_state_dict(state["model_state_dict"])
+            self._best_state_dict = copy.deepcopy(state["model_state_dict"])
+        self.history = state.get("training_history") or self.history
+        self._global_epoch = state.get("epoch", 0) or 0
+        self._global_step = state.get("global_step", 0) or 0
+        self._resume_stage = state.get("training_stage")
+        self._resume_stage_epoch = state.get("stage_epoch", 0) or 0
+        self._best_balanced_score = state.get("best_validation_metric")
+        if self._best_balanced_score is not None:
+            self.trackers["balanced_score"].best_value = self._best_balanced_score
+        early_stopping_state = state.get("early_stopping_state") or {}
+        self._resume_early_stopping_state = early_stopping_state or None
+        self._resume_optimizer_state = state.get("optimizer_state_dict")
+        self._resume_scheduler_state = state.get("scheduler_state_dict")
+        scaler_state = state.get("gradient_scaler_state_dict")
+        self._resume_scaler_state = scaler_state
+        if scaler_state is not None:
+            self.scaler.load_state_dict(scaler_state)
+        rng_state = state.get("rng_state")
+        if rng_state:
+            restore_rng_state(rng_state)
+        logger.info(
+            "[%s] Resuming from checkpoint: global_epoch=%d training_stage=%r stage_epoch=%d",
+            self.experiment_name, self._global_epoch, self._resume_stage, self._resume_stage_epoch,
+        )
+
+    def _build_checkpoint_payload(
+        self, stage_name: str, stage_epoch: int, optimizer: torch.optim.Optimizer | None,
+        scheduler, metrics: dict,
+    ) -> dict:
+        """Everything needed to resume training byte-for-byte from this
+        point -- see ``docs/transfer_learning.md`` "Persistent artifacts"
+        for the full field list this must (and does) contain."""
+        model_cfg = self.config.get("model", {})
+        log_var_age = getattr(self.model, "log_var_age", None)
+        log_var_gender = getattr(self.model, "log_var_gender", None)
+        return {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict() if optimizer is not None else None,
+            "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
+            "gradient_scaler_state_dict": self.scaler.state_dict(),
+            "epoch": self._global_epoch,
+            "stage_epoch": stage_epoch,
+            "global_step": self._global_step,
+            "training_stage": stage_name,
+            "best_validation_metric": self._best_balanced_score,
+            "early_stopping_state": self._current_early_stopping_state,
+            "training_history": self.history,
+            "seed": self.training_cfg.get("seed"),
+            "rng_state": capture_rng_state(),
+            "model_id": self.model.model_id,
+            "pretrained_source": self.model.pretrained_source,
+            "input_size": self.model.input_size,
+            "transform_config": {
+                "mean": list(self.model.data_config.get("mean", [])),
+                "std": list(self.model.data_config.get("std", [])),
+                "interpolation": self.model.interpolation_name,
+                "input_size": self.model.input_size,
+            },
+            "split_sha256": self.split_sha256,
+            "age_head_config": model_cfg.get("age_head", {}),
+            "gender_head_config": model_cfg.get("gender_head", {}),
+            "adapter_config": model_cfg.get("adapters", {}),
+            "loss_balancing_params": {
+                "log_var_age": float(log_var_age.detach().cpu()) if log_var_age is not None else None,
+                "log_var_gender": float(log_var_gender.detach().cpu()) if log_var_gender is not None else None,
+            },
+            "optimizer_group_lrs": [g["lr"] for g in optimizer.param_groups] if optimizer is not None else None,
+            "git_commit_sha": self.git_commit_sha,
+            "config": self.config,
+            "metrics": metrics,
+            "extra": {"family": "pretrained_volo", "model_id": self.model.model_id,
+                      "pretrained_source": self.model.pretrained_source},
+        }
+
     def _build_optimizer(self, backbone_lr: float, adapter_lr: float, head_lr: float, balance_lr: float):
         weight_decay = self.training_cfg.get("weight_decay", 0.05)
         groups = self.model.get_parameter_groups(backbone_lr, adapter_lr, head_lr, balance_lr, weight_decay)
         return torch.optim.AdamW(groups)
 
-    def _run_stage(self, stage_name: str, epochs: int, backbone_lr: float, adapter_lr: float, head_lr: float,
-                    balance_lr: float, warmup_epochs: int, early_stopping_patience: int, global_epoch: int) -> int:
+    def _run_stage(
+        self, stage_name: str, epochs: int, backbone_lr: float, adapter_lr: float, head_lr: float,
+        balance_lr: float, warmup_epochs: int, early_stopping_patience: int, global_epoch: int,
+        resume_epoch_in_stage: int = 0, resume_optimizer_state: dict | None = None,
+        resume_scheduler_state: dict | None = None, resume_scaler_state: dict | None = None,
+        resume_early_stopping_state: dict | None = None,
+    ) -> int:
         trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.model.parameters())
         logger.info(
-            "[%s] === %s (epochs=%d) === trainable_params=%s/%s",
-            self.experiment_name, stage_name, epochs, f"{trainable:,}", f"{total:,}",
+            "[%s] === %s (epochs=%d, resuming_from_stage_epoch=%d) === trainable_params=%s/%s",
+            self.experiment_name, stage_name, epochs, resume_epoch_in_stage, f"{trainable:,}", f"{total:,}",
         )
 
         if self.device == "cuda":
@@ -236,10 +354,20 @@ class TransferTrainer:
         optimizer = self._build_optimizer(backbone_lr, adapter_lr, head_lr, balance_lr)
         scheduler = _build_scheduler(optimizer, epochs, warmup_epochs)
         early_stopping = EarlyStopping(patience=early_stopping_patience, mode="min")
+        if resume_optimizer_state is not None:
+            optimizer.load_state_dict(resume_optimizer_state)
+        if resume_scheduler_state is not None:
+            scheduler.load_state_dict(resume_scheduler_state)
+        if resume_scaler_state is not None:
+            self.scaler.load_state_dict(resume_scaler_state)
+        if resume_early_stopping_state:
+            early_stopping.best_value = resume_early_stopping_state.get("best_value")
+            early_stopping.num_bad_epochs = resume_early_stopping_state.get("num_bad_epochs", 0)
+            early_stopping.should_stop = resume_early_stopping_state.get("should_stop", False)
         loss_cfg = self.config["model"]["loss_balancing"]
         age_max = self.config["model"]["age_head"].get("age_max", 120)
 
-        for _ in range(epochs):
+        for epoch_in_stage in range(resume_epoch_in_stage, epochs):
             start = time.time()
             train_metrics = _run_epoch(
                 self.model, self.train_loader, optimizer, self.device, self.mixed_precision, self.scaler,
@@ -254,6 +382,8 @@ class TransferTrainer:
             scheduler.step()
             elapsed = time.time() - start
             global_epoch += 1
+            self._global_epoch = global_epoch
+            self._global_step += train_metrics.get("_optimizer_steps", 0)
 
             # get_parameter_groups() omits a group entirely when it has no
             # trainable params (e.g. "backbone" while Stage 1 has it
@@ -289,7 +419,26 @@ class TransferTrainer:
                 "yes" if is_best else "no",
             )
 
-            if val_metrics["loss"] == val_metrics["loss"] and early_stopping.step(val_metrics["loss"]):
+            should_stop = val_metrics["loss"] == val_metrics["loss"] and early_stopping.step(val_metrics["loss"])
+            self._current_early_stopping_state = {
+                "best_value": early_stopping.best_value, "num_bad_epochs": early_stopping.num_bad_epochs,
+                "should_stop": early_stopping.should_stop,
+            }
+
+            if self.artifact_manager is not None:
+                payload = self._build_checkpoint_payload(stage_name, epoch_in_stage + 1, optimizer, scheduler, val_metrics)
+                trainer_state = {
+                    "seed": self.training_cfg.get("seed"), "global_epoch": self._global_epoch,
+                    "stage_epoch": epoch_in_stage + 1, "training_stage": stage_name,
+                    "best_validation_metric": self._best_balanced_score,
+                    "git_commit_sha": self.git_commit_sha, "model_id": self.model.model_id,
+                    "pretrained_source": self.model.pretrained_source, "split_sha256": self.split_sha256,
+                }
+                self.artifact_manager.on_epoch_end(payload, self.history, trainer_state, is_best)
+                if is_best:
+                    self.artifact_manager.on_new_best(payload)
+
+            if should_stop:
                 logger.info("[%s] Early stopping triggered in %s at epoch %d", self.experiment_name, stage_name, global_epoch)
                 break
 
@@ -321,10 +470,41 @@ class TransferTrainer:
             cfg.get("early_stopping_patience", 12),
         )
 
+    def _consume_resume_state_for(self, stage_name: str) -> tuple[int, dict | None, dict | None, dict | None, dict | None]:
+        """Pop and clear any pending resume state, returning it only if it
+        matches ``stage_name`` -- consumed exactly once so a later stage
+        never accidentally re-applies an earlier stage's optimizer/scheduler
+        state (which would have incompatible parameter-group shapes)."""
+        stage_resume, stage_epoch_resume = self._resume_stage, self._resume_stage_epoch
+        opt_state, sched_state = self._resume_optimizer_state, self._resume_scheduler_state
+        scaler_state, es_state = self._resume_scaler_state, self._resume_early_stopping_state
+        self._resume_stage = None
+        self._resume_optimizer_state = self._resume_scheduler_state = None
+        self._resume_scaler_state = self._resume_early_stopping_state = None
+
+        if stage_resume != stage_name:
+            return 0, None, None, None, None
+        resume_epoch_in_stage = stage_epoch_resume
+        if resume_epoch_in_stage <= 0:
+            return 0, None, None, None, None
+        return resume_epoch_in_stage, opt_state, sched_state, scaler_state, es_state
+
     def run_stage_1(self) -> int:
         """Stage 1: freeze the backbone, train adapters/heads/balancing only.
         Public (not just called from train()) so a notebook can show Stage 1
-        and Stage 2 as separate cells."""
+        and Stage 2 as separate cells. If resume state says training already
+        reached Stage 2, this is a no-op (never re-runs Stage 1)."""
+        if self._resume_stage is not None and self._resume_stage != STAGE_1_NAME:
+            logger.info(
+                "[%s] Resume state is already past Stage 1 (training_stage=%r) -- skipping Stage 1.",
+                self.experiment_name, self._resume_stage,
+            )
+            self._resume_stage = None
+            self._resume_optimizer_state = self._resume_scheduler_state = None
+            self._resume_scaler_state = self._resume_early_stopping_state = None
+            return self._global_epoch
+
+        resume_epoch, opt_state, sched_state, scaler_state, es_state = self._consume_resume_state_for(STAGE_1_NAME)
         backbone_lr, adapter_lr, head_lr, balance_lr, warmup_epochs, patience = self._stage_lrs()
         head_only_epochs = self.training_cfg.get("head_only_epochs", 3)
         logger.info(
@@ -333,15 +513,28 @@ class TransferTrainer:
         )
         self.model.freeze_backbone()
         self._global_epoch = self._run_stage(
-            "Stage 1: frozen backbone", head_only_epochs, backbone_lr, adapter_lr, head_lr, balance_lr,
-            warmup_epochs, patience, global_epoch=getattr(self, "_global_epoch", 0),
+            STAGE_1_NAME, head_only_epochs, backbone_lr, adapter_lr, head_lr, balance_lr,
+            warmup_epochs, patience, global_epoch=self._global_epoch,
+            resume_epoch_in_stage=resume_epoch, resume_optimizer_state=opt_state,
+            resume_scheduler_state=sched_state, resume_scaler_state=scaler_state,
+            resume_early_stopping_state=es_state,
         )
+        if self.artifact_manager is not None:
+            transition_payload = self._build_checkpoint_payload(STAGE_2_NAME, 0, None, None, {})
+            trainer_state = {
+                "seed": self.training_cfg.get("seed"), "global_epoch": self._global_epoch, "stage_epoch": 0,
+                "training_stage": STAGE_2_NAME, "best_validation_metric": self._best_balanced_score,
+                "git_commit_sha": self.git_commit_sha, "model_id": self.model.model_id,
+                "pretrained_source": self.model.pretrained_source, "split_sha256": self.split_sha256,
+            }
+            self.artifact_manager.on_stage_transition(transition_payload, trainer_state)
         return self._global_epoch
 
     def run_stage_2(self) -> int:
         """Stage 2: unfreeze (full or last-N-stages, per config) and fine-tune
         at a low backbone LR / higher adapter+head+balance LR. Must be
         called after run_stage_1()."""
+        resume_epoch, opt_state, sched_state, scaler_state, es_state = self._consume_resume_state_for(STAGE_2_NAME)
         backbone_lr, adapter_lr, head_lr, balance_lr, warmup_epochs, patience = self._stage_lrs()
         finetune_epochs = self.training_cfg.get("finetune_epochs", 20)
         finetune_unfreeze = self.training_cfg.get("finetune_unfreeze", "full")
@@ -356,8 +549,11 @@ class TransferTrainer:
                 "{'last_n_stages': N}."
             )
         self._global_epoch = self._run_stage(
-            "Stage 2: fine-tune", finetune_epochs, backbone_lr, adapter_lr, head_lr, balance_lr,
-            warmup_epochs, patience, global_epoch=getattr(self, "_global_epoch", 0),
+            STAGE_2_NAME, finetune_epochs, backbone_lr, adapter_lr, head_lr, balance_lr,
+            warmup_epochs, patience, global_epoch=self._global_epoch,
+            resume_epoch_in_stage=resume_epoch, resume_optimizer_state=opt_state,
+            resume_scheduler_state=sched_state, resume_scaler_state=scaler_state,
+            resume_early_stopping_state=es_state,
         )
         return self._global_epoch
 
