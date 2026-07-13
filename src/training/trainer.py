@@ -323,6 +323,21 @@ class Trainer:
         }
         return metrics
 
+    # The single, centralized main validation selection criterion. Both the
+    # main "best" checkpoint AND early stopping use exactly this score and
+    # mode (higher is better), so the checkpoint reported as "best" is always
+    # the one training actually stopped at / around -- they can never diverge
+    # (the previous bug: checkpoint selection on balanced_score but early
+    # stopping on validation total loss). The separate age-MAE-best and
+    # gender-accuracy-best checkpoints remain as diagnostics only.
+    #
+    # Score S = gender_accuracy - age_mae / age_max, using the raw (non-
+    # selective, coverage-independent) validation gender accuracy -- never
+    # the confidence-thresholded selective accuracy, whose value depends on
+    # the abstention coverage. Selection uses validation data only.
+    SELECTION_METRIC = "balanced_score"
+    SELECTION_MODE = "max"
+
     def _balanced_score(self, age_mae: float, gender_acc: float, age_max: float) -> float:
         if age_mae != age_mae:  # NaN check
             return gender_acc if gender_acc == gender_acc else float("-inf")
@@ -384,7 +399,12 @@ class Trainer:
                 optimizer, stage.epochs, self.training_cfg["scheduler"].get("warmup_epochs", 1),
                 self.training_cfg["scheduler"].get("warmup_start_factor", 0.1),
             )
-            early_stopping = EarlyStopping(patience=self.training_cfg.get("early_stopping_patience", 8), mode="min")
+            # Early stopping tracks the SAME centralized selection metric/mode
+            # as checkpoint selection (see SELECTION_METRIC/SELECTION_MODE) --
+            # not validation total loss -- so the two never disagree.
+            early_stopping = EarlyStopping(
+                patience=self.training_cfg.get("early_stopping_patience", 8), mode=self.SELECTION_MODE,
+            )
 
             for _ in range(stage.epochs):
                 start = time.time()
@@ -437,9 +457,12 @@ class Trainer:
                 self._write_incremental_history()
                 self._write_status_atomic(stage.name, global_epoch, total_epochs_planned, early_stopping)
 
-                if not (val_metrics["loss"] == val_metrics["loss"]):
+                # Early stopping on the centralized selection score (higher is
+                # better), skipping epochs whose score is NaN (a task absent
+                # this run) rather than counting them as non-improvements.
+                if not (balanced == balanced):
                     continue
-                if early_stopping.step(val_metrics["loss"]):
+                if early_stopping.step(balanced):
                     stop_line = f"[{self.experiment_name} | seed={seed_display}] Early stopping triggered at epoch {global_epoch}"
                     print(stop_line, flush=True)
                     logger.info(stop_line)

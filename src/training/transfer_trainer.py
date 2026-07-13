@@ -76,8 +76,20 @@ def _run_epoch(
     age_abs_errors = []
     gender_correct, gender_total = 0, 0
     optimizer_steps = 0
+    skipped_optimizer_steps = 0
+    microbatches_processed = 0
+    microbatches_in_group = 0
 
     mode, fixed = resolve_loss_balancing(loss_cfg, current_epoch)
+
+    # The number of batches this epoch will actually process -- which is
+    # min(len(loader), max_batches) when max_train_batches_per_epoch caps the
+    # epoch early. The final *effective* batch (not necessarily len(loader)-1)
+    # must trigger an optimizer step so its partial accumulation group is not
+    # silently dropped.
+    effective_num_batches = len(loader)
+    if max_batches is not None:
+        effective_num_batches = min(effective_num_batches, max_batches)
 
     if is_train:
         optimizer.zero_grad()
@@ -105,18 +117,41 @@ def _run_epoch(
                 )
 
         if is_train:
-            scaled_loss = loss_out.total_loss / grad_accumulation_steps
-            scaler.scale(scaled_loss).backward()
-            is_accumulation_boundary = (batch_idx + 1) % grad_accumulation_steps == 0
-            is_last_batch = (batch_idx + 1) == len(loader)
-            if is_accumulation_boundary or is_last_batch:
+            # Scale each microbatch loss by 1/grad_accumulation_steps so a
+            # full accumulation window averages the group's gradients. A
+            # partial final window (fewer than grad_accumulation_steps
+            # microbatches) is corrected below by rescaling to divide by the
+            # actual microbatch count, so it is never underweighted.
+            scaler.scale(loss_out.total_loss / grad_accumulation_steps).backward()
+            microbatches_processed += 1
+            microbatches_in_group += 1
+            is_accumulation_boundary = microbatches_in_group == grad_accumulation_steps
+            is_last_effective_batch = (batch_idx + 1) == effective_num_batches
+            if is_accumulation_boundary or is_last_effective_batch:
+                # Unscale once (needed for both the partial-window correction
+                # and gradient clipping); scaler.step() then won't re-unscale.
+                scaler.unscale_(optimizer)
+                if microbatches_in_group != grad_accumulation_steps:
+                    correction = grad_accumulation_steps / microbatches_in_group
+                    for group in optimizer.param_groups:
+                        for p in group["params"]:
+                            if p.grad is not None:
+                                p.grad.mul_(correction)
                 if grad_clip_norm:
-                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+                scale_before_step = scaler.get_scale()
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
-                optimizer_steps += 1
+                microbatches_in_group = 0
+                # GradScaler skips optimizer.step() (only shrinking the scale)
+                # on a non-finite gradient. Count a real step only when the
+                # scale did not shrink, so global step counts / the scheduler
+                # never advance on an AMP-skipped step.
+                if scaler.get_scale() >= scale_before_step:
+                    optimizer_steps += 1
+                else:
+                    skipped_optimizer_steps += 1
 
         total_loss += loss_out.total_loss.item()
         n_batches += 1
@@ -146,6 +181,10 @@ def _run_epoch(
         "age_mae": float(torch.cat(age_abs_errors).mean()) if age_abs_errors else float("nan"),
         "gender_accuracy": gender_correct / max(1, gender_total) if gender_total else float("nan"),
         "_optimizer_steps": optimizer_steps,
+        "_skipped_optimizer_steps": skipped_optimizer_steps,
+        "_microbatches_processed": microbatches_processed,
+        "_effective_batches": effective_num_batches if is_train else n_batches,
+        "_any_optimizer_step": optimizer_steps > 0,
     }
 
 
@@ -361,7 +400,10 @@ class TransferTrainer:
         optimizer = self._build_optimizer(backbone_lr, adapter_lr, head_lr, balance_lr)
         warmup_start_factor = self.training_cfg.get("scheduler", {}).get("warmup_start_factor", 0.1)
         scheduler = _build_scheduler(optimizer, epochs, warmup_epochs, warmup_start_factor)
-        early_stopping = EarlyStopping(patience=early_stopping_patience, mode="min")
+        # Early stopping tracks the SAME balanced selection score (higher is
+        # better) that checkpoint selection uses -- not validation total loss
+        # -- so the best checkpoint and the stopping decision never diverge.
+        early_stopping = EarlyStopping(patience=early_stopping_patience, mode="max")
         if resume_optimizer_state is not None:
             optimizer.load_state_dict(resume_optimizer_state)
         if resume_scheduler_state is not None:
@@ -387,7 +429,19 @@ class TransferTrainer:
                 self.grad_clip_norm, self.grad_accumulation_steps, loss_cfg, global_epoch + 1,
                 self.gender_class_weights, self.confidence_threshold, self.max_val_batches,
             )
-            scheduler.step()
+            # Only advance the (epoch-based) LR scheduler when the optimizer
+            # actually stepped this epoch -- if AMP skipped every step on
+            # non-finite gradients, stepping the scheduler would run it ahead
+            # of the optimizer (torch raises "lr_scheduler.step() before
+            # optimizer.step()"). Mirrors the core Trainer's behaviour.
+            if train_metrics.get("_any_optimizer_step", True):
+                scheduler.step()
+            if train_metrics.get("_skipped_optimizer_steps"):
+                logger.warning(
+                    "[%s] %s epoch %d: %d optimizer step(s) skipped by GradScaler (non-finite gradients).",
+                    self.experiment_name, stage_name, global_epoch + 1,
+                    train_metrics["_skipped_optimizer_steps"],
+                )
             elapsed = time.time() - start
             global_epoch += 1
             self._global_epoch = global_epoch
@@ -427,7 +481,7 @@ class TransferTrainer:
                 "yes" if is_best else "no",
             )
 
-            should_stop = val_metrics["loss"] == val_metrics["loss"] and early_stopping.step(val_metrics["loss"])
+            should_stop = balanced == balanced and early_stopping.step(balanced)
             self._current_early_stopping_state = {
                 "best_value": early_stopping.best_value, "num_bad_epochs": early_stopping.num_bad_epochs,
                 "should_stop": early_stopping.should_stop,
