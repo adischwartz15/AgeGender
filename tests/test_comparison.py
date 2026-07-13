@@ -102,6 +102,18 @@ def test_aggregate_seed_metrics_computes_mean_and_std():
     assert agg["_n_seed_runs"] == 3
 
 
+def test_aggregate_seed_metrics_uses_sample_std_ddof1():
+    """The reported std must be the sample std (ddof=1), not the population
+    std (ddof=0), for the final multi-seed table -- for [5,6,7] that is 1.0,
+    not sqrt(2/3) ~= 0.816."""
+    import numpy as np
+
+    per_seed = [{"age_mae": 5.0}, {"age_mae": 6.0}, {"age_mae": 7.0}]
+    agg = aggregate_seed_metrics(per_seed)
+    assert abs(agg["age_mae"]["std"] - float(np.std([5.0, 6.0, 7.0], ddof=1))) < 1e-9
+    assert abs(agg["age_mae"]["std"] - 1.0) < 1e-9  # sample std, not 0.8165 (population)
+
+
 def test_aggregate_seed_metrics_std_is_none_with_single_seed():
     agg = aggregate_seed_metrics([{"age_mae": 5.0}])
     assert agg["age_mae"]["mean"] == 5.0

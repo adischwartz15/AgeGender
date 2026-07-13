@@ -116,14 +116,21 @@ def build_backbone_comparison_table_multi(metrics_by_name: dict[str, dict]) -> p
 
 
 def aggregate_seed_metrics(per_seed_metrics: list[dict], keys: tuple[str, ...] = _SEED_METRIC_KEYS) -> dict:
-    """Compute mean +/- std across N seed runs' test-metric dicts.
+    """Compute mean +/- **sample** std across N seed runs' test-metric dicts.
 
     Returns ``{key: {"mean": ..., "std": ..., "n_seeds": N}}`` for each
     key present (and numeric) in at least one provided dict; missing
     values for a given seed are simply excluded from that key's mean/std
-    rather than treated as zero. With fewer than 2 seed runs, ``std`` is
-    reported as ``None`` (not 0.0) so callers can render an honest
-    "insufficient runs" message instead of a misleadingly precise number.
+    rather than treated as zero (so each metric carries its own
+    ``n_seeds``, not a single row-level count -- see the final-run reporting
+    protocol). With fewer than 2 seed runs, ``std`` is reported as ``None``
+    (not 0.0) so callers can render an honest "insufficient runs" message
+    instead of a misleadingly precise number.
+
+    The reported std is the **sample** standard deviation (``ddof=1``), the
+    correct estimator for the population std from a small number of seed
+    runs -- the population std (``ddof=0``) would systematically
+    understate run-to-run variability for the final 3-seed table.
     """
     result: dict[str, dict] = {}
     n_seeds = len(per_seed_metrics)
@@ -133,7 +140,7 @@ def aggregate_seed_metrics(per_seed_metrics: list[dict], keys: tuple[str, ...] =
             continue
         result[key] = {
             "mean": float(np.mean(values)),
-            "std": float(np.std(values)) if len(values) >= 2 else None,
+            "std": float(np.std(values, ddof=1)) if len(values) >= 2 else None,
             "n_seeds": len(values),
         }
     result["_n_seed_runs"] = n_seeds
