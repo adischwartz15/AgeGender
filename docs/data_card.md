@@ -79,8 +79,13 @@ any training:
 2. Detects and removes duplicate file paths and duplicate image content (via SHA-256 hash).
 3. Reports age distribution, gender-label distribution, and image-size
    statistics to `outputs/data_quality/data_quality_report.json`.
-4. Splits into **train / validation / calibration / test** (default fractions 60/15/10/15, `configs/data.yaml: split.*_fraction`) with a fixed seed; splits at the **subject level** (not just image level) when a `subject_id` column is available, so the same person never appears in more than one split.
+4. Splits into **train / validation / calibration / test** (default fractions 60/15/10/15, `configs/data.yaml: split.*_fraction`) with a fixed seed; splits at the **subject level** (not just image level) when a `subject_id` column is available, so the same person never appears in more than one split. **UTKFace itself provides no `subject_id`/identity field**, so this guarantee does not currently apply to this project's actual dataset -- see [docs/reproducibility.md](reproducibility.md#stratified-locked-split).
 5. Asserts no image path or subject_id spans multiple splits before writing `data/splits/full_metadata_with_splits.csv`.
+6. For the final, locked split used by every reported experiment,
+   `scripts/lock_split.py` additionally stratifies by age bin x gender
+   label and records a manifest (split hash, per-stratum counts,
+   near-duplicate audit) -- see
+   [docs/reproducibility.md](reproducibility.md#stratified-locked-split).
 
 Each of the four splits has exactly one job: `train` fits the model;
 `validation` is read only for early stopping and checkpoint selection

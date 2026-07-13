@@ -1,7 +1,11 @@
 # Supplementary Experiment: ImageNet-Pretrained VOLO-D1 (Face-Only)
 
-Practical guide to the transfer-learning extension. For the research
-question the *core* ablation suite answers, see
+Practical guide to the transfer-learning extension. This originally covered
+only VOLO-D1; it now also covers the pretrained-ResNet-18/50 bridge
+baselines (see "Model families" below) -- all three model families share
+this same trainer, persistence layer, seeds, and Table B, so one guide
+covers all of them. For the research question the *core* ablation suite
+answers, see
 [docs/experiment_plan.md](experiment_plan.md); for why this extension is
 kept structurally separate from that suite, see the README's
 [Core vs. supplementary experiments](../README.md#core-vs-supplementary-experiments)
@@ -79,6 +83,42 @@ Selecting the extension without `timm` installed raises immediately with:
 `pip install -r requirements-transfer.txt`." -- never a silent fallback to
 random initialization.
 
+## Model families
+
+`scripts/run_transfer_learning.py --model-family {volo,pretrained_resnet18,pretrained_resnet50}`
+(default `volo`) selects which pretrained backbone is trained/evaluated;
+all three reuse the exact same `TransferTrainer`, adapters, heads, learned
+loss-balancing, two-stage schedule, canonical seeds, locked split, and
+persistence layer above -- only the backbone class and its own official
+preprocessing differ.
+
+- **`pretrained_resnet18`** (`src/models/pretrained_resnet.py`,
+  `configs/pretrained_resnet18.yaml`) -- **required**: an ImageNet-pretrained
+  `torchvision.models.resnet18`, the most interpretable pretraining-bridge
+  comparison against this project's from-scratch Custom ResNet-18, since
+  both share the ResNet architecture family. It is **not** claimed to be
+  byte-identical to the from-scratch Custom ResNet-18 -- see
+  `PretrainedResNetFaceOnlyMultiTask`'s module docstring for the exact,
+  documented implementation differences (stem, downsampling, block design).
+- **`pretrained_resnet50`** (`configs/pretrained_resnet50.yaml`) --
+  **optional**: same bridge role plus a capacity/architecture-depth
+  comparison. Its role is always described as "pretraining + architecture +
+  capacity comparison," **never** as isolating pretraining alone (it
+  differs from ResNet-18 in depth and parameter count too).
+- Preprocessing for both is `weights.transforms()` from `torchvision`'s
+  official model weight metadata (resolved via `resolve_eval_transform`,
+  `src/data/transforms.py`) -- never this project's own 128px/ImageNet-constant
+  default, and never VOLO's `crop_pct`.
+
+```bash
+python scripts/run_transfer_learning.py --model-family pretrained_resnet18 --seeds 42,123,2026
+python scripts/run_transfer_learning.py --model-family pretrained_resnet50 --seeds 42,123,2026 \
+    --resume --skip-completed --sync-after-epoch
+```
+
+Requires `torchvision` (`requirements-transfer.txt`, same optional-dependency
+posture as `timm` -- never a core dependency).
+
 ## Canonical seeds
 
 **42, 123, 2026** -- identical to the core suite's pre-registered protocol
@@ -112,6 +152,10 @@ python scripts/run_transfer_learning.py --smoke
 
 python scripts/run_transfer_learning.py --only volo                      # skip the baseline row
 python scripts/run_transfer_learning.py --only baseline                  # skip VOLO, reuse the baseline row only
+
+# Other model families (see "Model families" above) -- identical flags, just --model-family:
+python scripts/run_transfer_learning.py --model-family pretrained_resnet18 --seeds 42,123,2026
+python scripts/run_transfer_learning.py --model-family pretrained_resnet50 --seeds 42,123,2026 --smoke
 ```
 
 The from-scratch baseline (`exp_d_shared_adapters_learned_balance` by
@@ -321,11 +365,24 @@ rather than included with zero gradient.
 ## Reproducibility
 
 Same UTKFace split as the core suite (`data/splits/full_metadata_with_splits.csv`,
-never regenerated for this experiment), same age loss/gender loss/label
+never regenerated for this experiment; see
+[docs/reproducibility.md](reproducibility.md#stratified-locked-split) for
+how it is generated and locked), same age loss/gender loss/label
 mapping/age clipping, same evaluation functions and postprocessing. Every
 run saves: metrics JSON, predictions, config snapshot, split fingerprint
 (SHA-256), training history, plots, seed, dependency versions
 (Python/PyTorch/`timm`/CUDA), and the git commit SHA.
+
+**Preprocessing is model-aware, not a shared hardcoded default.** Every
+evaluation/inference/calibration entry point resolves each model's own
+preprocessing via `resolve_eval_transform` (`src/data/transforms.py`) --
+`model.build_transforms()` when the model declares one (VOLO, both
+pretrained-ResNet families), the project's 128px/ImageNet-constant default
+otherwise. This includes VOLO's `crop_pct` (`0.96` for `volo_d1_224`,
+verified against a real `timm` install, not assumed to be `1.0`) and each
+pretrained-ResNet's official `torchvision` weight transform -- silently
+using the wrong crop ratio or resize/crop protocol would bias every metric
+downstream without an explicit error.
 
 ## Limitations
 

@@ -270,9 +270,24 @@ needs a GPU.
 separate table from Table A (the core ablation table) -- never merged,
 never compared cell-for-cell with Table A's rows. Columns: Model, Experiment
 category, Initialization, Backbone, Adapters, Loss balancing, Input size,
-Age MAE, Age RMSE, CS@5, Gender acc, Gender F1, Params, Trainable params.
+Age MAE, Age RMSE, Age median AE, CS@5, Gender selective acc (tau=0.80),
+Gender balanced acc (raw, full coverage), Gender F1, Params, Trainable
+params -- selective and balanced accuracy are always two distinct columns,
+never merged into one "gender accuracy" (see
+[docs/evaluation.md](docs/evaluation.md#balanced-accuracy-vs-selective-accuracy----do-not-conflate)).
 With fewer than 2 completed seeds per row, values are explicitly labelled
 "(n=1, no std)" rather than presented as a variance-estimated result.
+
+**Other model families in Table B.** `--model-family {volo,pretrained_resnet18,pretrained_resnet50}`
+adds a pretrained-ResNet-18 (required) / ResNet-50 (optional) bridge
+baseline as additional Table B rows, reusing this exact same trainer/
+persistence/evaluation pipeline -- see
+[docs/transfer_learning.md#model-families](docs/transfer_learning.md#model-families).
+ResNet-50's role is always "pretraining + architecture + capacity
+comparison," never "isolating pretraining." A separate, CPU-only,
+"unlearned" reference floor (raw-pixel and frozen-backbone k-NN/kernel
+baselines, no neural network training at all) is documented in
+[docs/nonparametric_baselines.md](docs/nonparametric_baselines.md).
 
 **Limitations.**
 - **Confounded comparison, by design.** VOLO-D1 differs from the
@@ -359,7 +374,8 @@ artifacts and are never committed -- see
 - [Robustness evaluation](docs/robustness.md)
 - [Evaluation metric definitions](docs/evaluation.md)
 - [API usage](docs/api.md)
-- [Supplementary experiment: ImageNet-pretrained VOLO-D1](docs/transfer_learning.md)
+- [Supplementary experiments: VOLO-D1 and pretrained ResNet-18/50](docs/transfer_learning.md)
+- [Non-parametric baselines (raw/PCA and frozen-backbone)](docs/nonparametric_baselines.md)
 - [Colab and Kaggle notebooks](docs/notebooks.md)
 - [Execution modes and notebook flags](docs/execution_modes.md)
 - [Reproducibility](docs/reproducibility.md)

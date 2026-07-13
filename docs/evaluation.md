@@ -67,6 +67,33 @@ it means **selective accuracy** unless explicitly labeled otherwise;
 always check whether coverage/effective accuracy are reported alongside
 it before treating the number as a full picture.
 
+### Balanced accuracy vs. selective accuracy -- do not conflate
+
+`gender_balanced_accuracy` (`src/evaluation/metrics.py`) is the
+class-balanced accuracy over **every** sample at **full coverage**
+(`confidence_threshold=0.0` -- nothing abstains) -- a different number from
+selective accuracy above, which excludes abstained samples at the
+*configured* threshold (default 0.80) and is not class-balanced. Table B
+(`src/evaluation/comparison.py`) labels these as two distinct columns,
+"Gender selective acc (tau=0.80)" and "Gender balanced acc (raw, full
+coverage)" -- never collapsed into one "gender accuracy" column, since they
+answer different questions (deployment-realistic selective performance vs.
+a class-imbalance-robust full-coverage summary).
+
+`src/evaluation/selective.py::gender_selective_prediction_report` computes
+selective accuracy, coverage, abstention rate, effective accuracy, balanced
+accuracy, precision/recall/F1, ROC-AUC, and the AURC/risk-coverage curve
+together in one call at the configured threshold;
+`full_coverage_gender_report` is the same function at
+`confidence_threshold=0.0`, for the abstention-off comparison point. Both
+are **evaluation-only** analyses over an already-trained model's saved
+predictions/probabilities -- neither ever trains, fine-tunes, or otherwise
+constructs a separate "no-abstention model." Abstention is a decision rule
+applied at evaluation time to one model's output probabilities, not a
+different training configuration (see `tests/test_abstention_evaluation_only.py`,
+which proves this by monkeypatching `Trainer.train`/`TransferTrainer.train`
+to raise and confirming neither is ever reached by this analysis path).
+
 ## Selective prediction / AURC (both tasks)
 
 `src/evaluation/selective.py`, used identically for gender (confidence =
@@ -89,11 +116,29 @@ or RMSE):
   on the AURC difference is treated as such (see
   `docs/backbone_comparison.md` and `docs/final_evaluation_protocol.md`).
 
+## Per-sample prediction export
+
+`scripts/evaluate.py::evaluate_checkpoint` also exports every individual
+test-set prediction via `src/evaluation/predictions.py::export_predictions`
+-- one row per sample (true/predicted age, quantiles, calibrated interval,
+predicted gender label, class probabilities, confidence, abstention flag,
+correctness flags), written atomically alongside a sidecar provenance
+manifest (checkpoint hash, split hash, calibration artifact hash, model
+family/backbone/pretrained source, preprocessing config, git commit,
+dependency versions). `recompute_aggregate_metrics_from_predictions`
+recomputes the same MAE/accuracy/coverage numbers directly from this
+exported per-sample file -- proven by test
+(`tests/test_predictions_export.py`) to reproduce the aggregate metrics
+`scripts/evaluate.py` reports in the same run exactly, so the per-sample
+export can be trusted as a faithful, auditable record rather than a
+separate, potentially-drifted computation.
+
 ## Where these are produced
 
 - `scripts/evaluate.py` -- single-checkpoint test-set evaluation (MAE,
   RMSE, R2, raw + calibrated coverage/width, per-bucket uncertainty,
-  gender confusion matrix/abstention, optional k-NN comparison).
+  gender confusion matrix/abstention, optional k-NN comparison), plus the
+  per-sample prediction export above.
 - `scripts/run_robustness.py` -- the same core metrics under corruption
   (see `docs/robustness.md`).
 - `scripts/compare_backbones.py` -- selective-risk/AURC/bootstrap/tail-error
