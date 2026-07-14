@@ -6,8 +6,9 @@ from __future__ import annotations
 import numpy as np
 
 from src.evaluation.metrics import (
-    age_error_percentiles, age_tail_error_rates, age_uncertainty_by_bucket, gender_coverage,
-    gender_effective_accuracy, select_interval_examples,
+    age_cumulative_score, age_error_percentiles, age_median_absolute_error, age_tail_error_rates,
+    age_uncertainty_by_bucket, gender_balanced_accuracy, gender_coverage, gender_effective_accuracy,
+    gender_precision_recall_f1, gender_roc_auc, select_interval_examples,
 )
 
 
@@ -109,6 +110,71 @@ def test_gender_effective_accuracy_denominator_includes_abstentions():
     abstain = np.array([False, False, False, True])  # last sample abstained (also wrong if answered)
     # Effective accuracy = correct-and-accepted / all = 2 / 4 = 0.5
     assert gender_effective_accuracy(y_true, y_pred, abstain) == 0.5
+
+
+def test_age_median_absolute_error_matches_manual_computation():
+    y_true = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
+    y_pred = np.array([12.0, 18.0, 35.0, 30.0, 90.0])  # errors: 2, 2, 5, 10, 40
+    assert abs(age_median_absolute_error(y_true, y_pred) - 5.0) < 1e-9
+
+
+def test_age_median_absolute_error_matches_age_error_percentiles():
+    """age_error_percentiles reuses age_median_absolute_error internally --
+    they must always agree exactly, not just approximately."""
+    y_true = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
+    y_pred = np.array([12.0, 18.0, 35.0, 30.0, 90.0])
+    assert age_median_absolute_error(y_true, y_pred) == age_error_percentiles(y_true, y_pred)["median"]
+
+
+def test_age_cumulative_score_at_5_years():
+    y_true = np.array([0.0, 0.0, 0.0, 0.0])
+    y_pred = np.array([3.0, 5.0, 7.0, 20.0])  # errors: 3, 5, 7, 20
+    # <=5 years: errors 3 and 5 qualify (2 of 4)
+    assert age_cumulative_score(y_true, y_pred, threshold=5.0) == 0.5
+
+
+def test_age_cumulative_score_is_1_when_all_errors_within_threshold():
+    y_true = np.array([10.0, 20.0])
+    y_pred = np.array([11.0, 19.0])
+    assert age_cumulative_score(y_true, y_pred, threshold=5.0) == 1.0
+
+
+def test_gender_balanced_accuracy_handles_class_imbalance():
+    # 8 of class 0 (all correct), 2 of class 1 (both wrong) -> raw accuracy
+    # 0.8, but balanced accuracy averages per-class recall: (1.0 + 0.0) / 2.
+    y_true = np.array([0] * 8 + [1] * 2)
+    y_pred = np.array([0] * 8 + [0] * 2)
+    assert abs(gender_balanced_accuracy(y_true, y_pred) - 0.5) < 1e-9
+
+
+def test_gender_precision_recall_f1_binary_positive_class_1():
+    y_true = np.array([0, 0, 1, 1, 1])
+    y_pred = np.array([0, 1, 1, 1, 0])  # class 1: TP=2, FP=1, FN=1
+    result = gender_precision_recall_f1(y_true, y_pred)
+    assert abs(result["precision"] - 2 / 3) < 1e-9
+    assert abs(result["recall"] - 2 / 3) < 1e-9
+    assert abs(result["f1"] - 2 / 3) < 1e-9
+
+
+def test_gender_precision_recall_f1_zero_division_returns_zero_not_a_crash():
+    y_true = np.array([0, 0, 0])
+    y_pred = np.array([0, 0, 0])  # no positive predictions or labels at all
+    result = gender_precision_recall_f1(y_true, y_pred)
+    assert result == {"precision": 0.0, "recall": 0.0, "f1": 0.0}
+
+
+def test_gender_roc_auc_returns_none_for_single_class_without_raising():
+    """Undefined on a tiny/degenerate smoke split (only one class present) --
+    must return None explicitly, never raise or silently fabricate a value."""
+    y_true = np.array([1, 1, 1, 1])
+    probs = np.array([0.9, 0.6, 0.7, 0.55])
+    assert gender_roc_auc(y_true, probs) is None
+
+
+def test_gender_roc_auc_perfect_separation_is_1():
+    y_true = np.array([0, 0, 1, 1])
+    probs = np.array([0.1, 0.2, 0.8, 0.9])
+    assert gender_roc_auc(y_true, probs) == 1.0
 
 
 def test_gender_effective_accuracy_lower_than_selective_accuracy_when_abstaining_on_hard_cases():

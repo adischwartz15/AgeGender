@@ -62,7 +62,11 @@ def training_helpers_namespace(request, tmp_path):
         # Simulate scripts/train.py: creates the checkpoint the caller expects.
         # A real torch.save is needed since train_one_experiment loads it
         # back (torch.load(...)["config"]) to extract the resolved config.
-        if cmd[1].endswith("train.py") or (len(cmd) > 1 and "train.py" in cmd[1]):
+        # Checks the whole command (not a fixed index) since real commands
+        # now insert "-u" (unbuffered output) between sys.executable and the
+        # script path.
+        cmd_str = " ".join(str(c) for c in cmd)
+        if "train.py" in cmd_str:
             experiment_name = cmd[cmd.index("--experiment-name") + 1]
             checkpoint_dir = run_dir / "experiments" / experiment_name / "seed_42" / "checkpoints"
             checkpoint_dir.mkdir(parents=True, exist_ok=True)

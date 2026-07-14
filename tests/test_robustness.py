@@ -14,9 +14,10 @@ import torch
 from PIL import Image
 
 from src.evaluation.robustness import (
-    CORRUPTION_NAMES, apply_corruption, build_robustness_diff_table, compute_degradation, gaussian_blur,
-    gaussian_noise, grayscale, high_brightness, high_contrast, iter_corruption_configs, jpeg_compression,
-    low_brightness, low_contrast, low_resolution, partial_crop, partial_occlusion, stratified_sample,
+    CORRUPTION_NAMES, apply_corruption, build_robustness_diff_table, compute_degradation, corruption_summary,
+    gaussian_blur, gaussian_noise, grayscale, high_brightness, high_contrast, iter_corruption_configs,
+    jpeg_compression, low_brightness, low_contrast, low_resolution, partial_crop, partial_occlusion,
+    stratified_sample,
 )
 
 
@@ -106,6 +107,32 @@ def test_iter_corruption_configs_yields_new_corruption_types():
     names = {name for name, _, _ in configs}
     assert names == {"low_contrast", "grayscale"}
     assert len(configs) == 3
+
+
+def test_corruption_summary_is_computed_not_hardcoded():
+    robustness_cfg = {
+        "corruptions": {
+            "low_contrast": {"severities": [1, 2], "params": [0.7, 0.5]},
+            "grayscale": {"severities": [1], "params": [0.4]},
+        }
+    }
+    summary = corruption_summary(robustness_cfg)
+    assert summary["n_corruption_types"] == 2
+    assert summary["corruption_type_names"] == ["grayscale", "low_contrast"]
+    assert summary["n_total_conditions"] == 3  # 2 severities + 1 severity
+    assert summary["severities_per_type"] == {"low_contrast": 2, "grayscale": 1}
+
+
+def test_corruption_summary_matches_real_config():
+    """The doc claim of '11 types x 3 severities' must match the ACTUAL
+    configs/robustness.yaml -- this test fails loudly the moment they
+    diverge, instead of letting docs/robustness.md silently go stale."""
+    from src.utils.config import CONFIG_DIR, load_config
+
+    robustness_cfg = load_config(CONFIG_DIR / "robustness.yaml")["robustness"]
+    summary = corruption_summary(robustness_cfg)
+    assert summary["n_corruption_types"] == len(CORRUPTION_NAMES)
+    assert summary["n_total_conditions"] == sum(summary["severities_per_type"].values())
 
 
 @pytest.mark.parametrize(

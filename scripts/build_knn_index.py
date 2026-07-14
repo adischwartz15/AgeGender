@@ -18,7 +18,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.dataset import FaceMultiTaskDataset
-from src.data.transforms import EvalTransform
+from src.data.transforms import resolve_eval_transform
 from src.evaluation.knn_baseline import KNNEmbeddingBaseline
 from src.inference.artifacts import load_model_checkpoint
 from src.utils.config import REPO_ROOT, resolve_device
@@ -63,7 +63,10 @@ def main() -> int:
         logger.error("No prepared split found at %s.", splits_path)
         return 1
     df = pd.read_csv(splits_path)
-    train_dataset = FaceMultiTaskDataset(df[df["split"] == "train"], EvalTransform(config["dataset"]["image_size"]))
+    # Model-aware preprocessing (see src/data/transforms.py::resolve_eval_transform)
+    # -- a VOLO/pretrained-ResNet checkpoint's own resolved transform, never
+    # this project's 128px/IMAGENET-constant default for such a model.
+    train_dataset = FaceMultiTaskDataset(df[df["split"] == "train"], resolve_eval_transform(model, config))
 
     age_embeds, gender_embeds, ages, age_mask, genders, gender_mask = _extract_embeddings(model, train_dataset, device)
 

@@ -25,19 +25,24 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.dataset import FaceMultiTaskDataset
-from src.data.transforms import EvalTransform
+from src.data.transforms import resolve_eval_transform
 from src.evaluation.calibration import apply_conformal_offset, load_calibration, validate_calibration_artifact
 from src.evaluation.comparison import build_parametric_vs_knn_table
 from src.evaluation.knn_baseline import KNNEmbeddingBaseline
 from src.evaluation.metrics import (
-    abstention_rate, age_mae, age_r2, age_rmse, age_uncertainty_by_bucket, confidence_statistics,
-    confusion_matrix, expected_calibration_error_intervals, gender_accuracy, interval_coverage,
-    mean_interval_width, median_interval_width, select_interval_examples,
+    abstention_rate, age_cumulative_score, age_mae, age_median_absolute_error, age_r2, age_rmse,
+    age_uncertainty_by_bucket, confidence_statistics, confusion_matrix,
+    expected_calibration_error_intervals, gender_accuracy, gender_balanced_accuracy,
+    gender_precision_recall_f1, gender_roc_auc, interval_coverage, mean_interval_width,
+    median_interval_width, select_interval_examples,
 )
+from src.evaluation.predictions import export_predictions
+from src.evaluation.selective import full_coverage_gender_report, gender_selective_prediction_report
 from src.inference.artifacts import load_model_checkpoint
 from src.utils.config import REPO_ROOT, resolve_device
-from src.utils.io import checkpoint_experiment_name, save_json
+from src.utils.io import checkpoint_experiment_name, file_sha256, save_json
 from src.utils.logging import get_logger
+from src.utils.provenance import dependency_versions, git_commit_sha
 from src.utils.visualization import (
     plot_age_scatter, plot_confusion_matrix, plot_coverage_width_tradeoff, plot_error_histogram,
     plot_interval_coverage, plot_interval_width_by_bucket,
@@ -97,6 +102,8 @@ def compute_parametric_metrics(preds: dict, confidence_threshold: float, calibra
         q10, q50, q90 = preds["q10"][age_mask], preds["q50"][age_mask], preds["q90"][age_mask]
         metrics.update({
             "age_mae": age_mae(y_true, q50), "age_rmse": age_rmse(y_true, q50), "age_r2": age_r2(y_true, q50),
+            "age_median_ae": age_median_absolute_error(y_true, q50),
+            "age_cs5": age_cumulative_score(y_true, q50, threshold=5.0),
             "interval_coverage": interval_coverage(y_true, q10, q90),
             "mean_interval_width": mean_interval_width(q10, q90),
             "median_interval_width": median_interval_width(q10, q90),
@@ -117,11 +124,31 @@ def compute_parametric_metrics(preds: dict, confidence_threshold: float, calibra
         predicted = probs.argmax(axis=1)
         confidence = probs.max(axis=1)
         abstain = confidence < confidence_threshold
+        prf = gender_precision_recall_f1(y_true_gender, predicted)
         metrics.update({
             "gender_accuracy": gender_accuracy(y_true_gender, predicted, abstain),
             "abstention_rate": abstention_rate(abstain),
             "confidence_stats": confidence_statistics(confidence),
+            # Standard classification metrics on the raw argmax prediction
+            # (not abstention-filtered) -- distinct from the selective
+            # "gender_accuracy" above, which only scores accepted predictions.
+            "gender_balanced_accuracy": gender_balanced_accuracy(y_true_gender, predicted),
+            "gender_precision": prf["precision"],
+            "gender_recall": prf["recall"],
+            "gender_f1": prf["f1"],
+            "gender_roc_auc": gender_roc_auc(y_true_gender, probs[:, 1]),
         })
+        # Full selective-prediction report (raw argmax accuracy, effective
+        # accuracy, risk-coverage curve, AURC) at the configured confidence
+        # threshold -- evaluation-only, from these exact probabilities, never
+        # a retrained model. See src/evaluation/selective.py.
+        metrics["gender_selective_report"] = gender_selective_prediction_report(
+            y_true_gender, probs, confidence_threshold=confidence_threshold,
+        )
+        # The "no abstention" point: the identical checkpoint/probabilities
+        # at confidence_threshold=0.0 (every prediction accepted), never a
+        # separate ablation_no_abstention training run.
+        metrics["gender_full_coverage_report"] = full_coverage_gender_report(y_true_gender, probs)
 
     return metrics
 
@@ -151,7 +178,18 @@ def evaluate_checkpoint(
         return None
     df = pd.read_csv(splits_path)
     test_df = df[df["split"] == "test"]
-    dataset = FaceMultiTaskDataset(test_df, EvalTransform(config["dataset"]["image_size"]))
+    # A model that declares its own preprocessing (VOLO / pretrained-ResNet,
+    # resolved from its pretrained backbone's own config) is evaluated with
+    # that transform instead of this project's 128px/IMAGENET-constant
+    # default -- every core model has no such method, so this is a no-op
+    # for them. See src/data/transforms.py::resolve_eval_transform, the
+    # single place this resolution logic lives (also used by
+    # scripts/calibrate.py, scripts/run_robustness.py,
+    # scripts/build_knn_index.py, and src/inference/predictor.py) --
+    # what makes the evaluation path byte-identical for a core checkpoint
+    # and a transfer-learning checkpoint alike.
+    eval_transform = resolve_eval_transform(model, config)
+    dataset = FaceMultiTaskDataset(test_df, eval_transform)
 
     preds = run_inference(model, dataset, device)
 
@@ -175,8 +213,42 @@ def evaluate_checkpoint(
 
     output_dir = REPO_ROOT / config["paths"]["output_dir"]
     metrics_dir, plots_dir = output_dir / "metrics", output_dir / "plots"
+    predictions_dir = output_dir / "predictions"
     metrics_dir.mkdir(parents=True, exist_ok=True)
     plots_dir.mkdir(parents=True, exist_ok=True)
+
+    # Per-sample prediction export: the EXACT same `preds` arrays already
+    # used for the aggregate metrics above -- never a second inference pass
+    # -- so a later re-analysis or paired statistical comparison never needs
+    # to re-run the model, and the exported file is guaranteed to reproduce
+    # the reported numbers (see tests/test_predictions_export.py).
+    export_predictions(
+        preds, predictions_dir / f"{output_name}_predictions.csv", split="test", calibration=calibration,
+        confidence_threshold=confidence_threshold,
+        manifest_path=predictions_dir / f"{output_name}_predictions_manifest.json",
+        provenance={
+            "experiment": checkpoint_experiment_name(checkpoint_path),
+            "checkpoint_path": str(checkpoint_path),
+            "checkpoint_sha256": file_sha256(checkpoint_path),
+            "split_path": str(splits_path),
+            "split_sha256": file_sha256(splits_path),
+            "calibration_artifact_sha256": (
+                file_sha256(Path(calibration_dir) / "conformal_calibration.json")
+                if calibration is not None and calibration_dir else None
+            ),
+            "model_family": config["model"].get("family", "core"),
+            "backbone_identifier": getattr(model, "model_id", config["model"].get("backbone", {}).get("name")),
+            "pretrained_source": getattr(model, "pretrained_source", None),
+            "input_size": getattr(model, "input_size", config["dataset"]["image_size"]),
+            "preprocessing": {
+                "image_size": eval_transform.image_size, "mean": list(eval_transform.mean),
+                "std": list(eval_transform.std), "interpolation": eval_transform.interpolation,
+                "crop_pct": getattr(eval_transform, "crop_pct", 1.0),
+            },
+            "git_commit_sha": git_commit_sha(),
+            "dependency_versions": dependency_versions(),
+        },
+    )
 
     age_mask = preds["age_mask"].astype(bool)
     if age_mask.any():

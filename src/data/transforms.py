@@ -29,25 +29,45 @@ def normalize(tensor: torch.Tensor, mean=IMAGENET_MEAN, std=IMAGENET_STD) -> tor
     return (tensor - mean_t) / std_t
 
 
-def resize(image: Image.Image, size: int) -> Image.Image:
-    return image.resize((size, size), Image.BILINEAR)
+def resize(image: Image.Image, size: int, interpolation: int = Image.BILINEAR) -> Image.Image:
+    return image.resize((size, size), interpolation)
 
 
-def resize_and_center_crop(image: Image.Image, size: int) -> Image.Image:
-    """Resize preserving aspect ratio (shorter side -> ``size``), then center-crop to ``size x size``.
+def resize_and_center_crop(
+    image: Image.Image, size: int, interpolation: int = Image.BILINEAR, crop_pct: float = 1.0,
+) -> Image.Image:
+    """Resize preserving aspect ratio, then center-crop to ``size x size``.
 
     Unlike a direct ``resize((size, size))`` squish, this avoids
     distorting the aspect ratio of non-square inputs (e.g. a
     portrait-oriented photo upload) before the model sees them.
+    ``interpolation`` defaults to bilinear (this project's original
+    behaviour); a pretrained-backbone experiment can pass its own
+    resolved interpolation mode (e.g. bicubic) instead.
+
+    ``crop_pct`` (default ``1.0``, i.e. every existing caller's behaviour is
+    unchanged) implements the standard ImageNet-style "resize-then-crop"
+    protocol some pretrained backbones' own preprocessing specifies: resize
+    the shorter side to ``round(size / crop_pct)``, then center-crop to
+    ``size``. With ``crop_pct == 1.0`` this reduces to resizing the shorter
+    side directly to ``size``, identical to the pre-existing behaviour. A
+    pretrained model's resolved ``crop_pct < 1.0`` (e.g. many timm/
+    torchvision configs) means the intermediate resize is *larger* than the
+    final crop, matching what that backbone was actually trained/validated
+    with -- using ``crop_pct=1.0`` unconditionally for such a model would
+    silently feed it out-of-distribution preprocessing.
     """
+    if not 0.0 < crop_pct <= 1.0:
+        raise ValueError(f"crop_pct must be in (0, 1], got {crop_pct}.")
+    resize_size = round(size / crop_pct)
     width, height = image.size
     if width < height:
-        new_width = size
-        new_height = max(size, round(height * size / width))
+        new_width = resize_size
+        new_height = max(resize_size, round(height * resize_size / width))
     else:
-        new_height = size
-        new_width = max(size, round(width * size / height))
-    resized = image.resize((new_width, new_height), Image.BILINEAR)
+        new_height = resize_size
+        new_width = max(resize_size, round(width * resize_size / height))
+    resized = image.resize((new_width, new_height), interpolation)
     left = (new_width - size) // 2
     top = (new_height - size) // 2
     return resized.crop((left, top, left + size, top + size))
@@ -59,7 +79,9 @@ def random_horizontal_flip(image: Image.Image, p: float = 0.5) -> Image.Image:
     return image
 
 
-def random_crop_resize(image: Image.Image, size: int, scale: tuple[float, float] = (0.8, 1.0)) -> Image.Image:
+def random_crop_resize(
+    image: Image.Image, size: int, scale: tuple[float, float] = (0.8, 1.0), interpolation: int = Image.BILINEAR,
+) -> Image.Image:
     width, height = image.size
     area = width * height
     for _ in range(10):
@@ -70,8 +92,8 @@ def random_crop_resize(image: Image.Image, size: int, scale: tuple[float, float]
         if w <= width and h <= height:
             x = random.randint(0, width - w)
             y = random.randint(0, height - h)
-            return image.crop((x, y, x + w, y + h)).resize((size, size), Image.BILINEAR)
-    return resize_and_center_crop(image, size)
+            return image.crop((x, y, x + w, y + h)).resize((size, size), interpolation)
+    return resize_and_center_crop(image, size, interpolation)
 
 
 def color_jitter(image: Image.Image, brightness: float = 0.2, contrast: float = 0.2, saturation: float = 0.2) -> Image.Image:
@@ -96,29 +118,107 @@ class EvalTransform:
     Used for validation/test/inference. Uses resize_and_center_crop
     rather than a direct squish-to-square, so a non-square input (e.g. an
     arbitrary uploaded photo) is not distorted before the model sees it.
+
+    ``mean``/``std``/``interpolation`` default to this project's original
+    values (``IMAGENET_MEAN``/``IMAGENET_STD``/bilinear), so every existing
+    caller that only passes ``image_size`` is unaffected. A pretrained
+    backbone experiment (e.g. VOLO via timm) can instead pass the exact
+    size/mean/std/interpolation resolved from that backbone's own
+    pretrained-model config, rather than this project's defaults.
     """
 
-    def __init__(self, image_size: int = 128) -> None:
+    def __init__(
+        self,
+        image_size: int = 128,
+        mean: tuple[float, float, float] = IMAGENET_MEAN,
+        std: tuple[float, float, float] = IMAGENET_STD,
+        interpolation: int = Image.BILINEAR,
+        crop_pct: float = 1.0,
+    ) -> None:
         self.image_size = image_size
+        self.mean = mean
+        self.std = std
+        self.interpolation = interpolation
+        self.crop_pct = crop_pct
 
     def __call__(self, image: Image.Image) -> torch.Tensor:
-        image = resize_and_center_crop(image, self.image_size)
+        image = resize_and_center_crop(image, self.image_size, self.interpolation, self.crop_pct)
         tensor = to_tensor(image)
-        return normalize(tensor)
+        return normalize(tensor, self.mean, self.std)
 
 
 class TrainTransform:
-    """Moderate augmentation pipeline used for supervised multi-task training."""
+    """Moderate augmentation pipeline used for supervised multi-task training.
 
-    def __init__(self, image_size: int = 128) -> None:
+    See :class:`EvalTransform` for the ``mean``/``std``/``interpolation``/
+    ``crop_pct`` default-preserving rationale. ``crop_pct`` only affects the
+    initial resize target of the random-crop-resize augmentation's fallback
+    path (see :func:`resize_and_center_crop`); the primary augmented path
+    (:func:`random_crop_resize`) already samples its own random crop region.
+    """
+
+    def __init__(
+        self,
+        image_size: int = 128,
+        mean: tuple[float, float, float] = IMAGENET_MEAN,
+        std: tuple[float, float, float] = IMAGENET_STD,
+        interpolation: int = Image.BILINEAR,
+        crop_pct: float = 1.0,
+    ) -> None:
         self.image_size = image_size
+        self.mean = mean
+        self.std = std
+        self.interpolation = interpolation
+        self.crop_pct = crop_pct
 
     def __call__(self, image: Image.Image) -> torch.Tensor:
-        image = random_crop_resize(image, self.image_size)
+        image = random_crop_resize(image, self.image_size, interpolation=self.interpolation)
         image = random_horizontal_flip(image)
         image = color_jitter(image)
         tensor = to_tensor(image)
-        return normalize(tensor)
+        return normalize(tensor, self.mean, self.std)
+
+
+def resolve_eval_transform(model, config: dict | None = None) -> EvalTransform:
+    """The single place every evaluation/calibration/robustness/feature-
+    extraction/inference/prediction-export code path resolves its
+    deterministic preprocessing from.
+
+    If ``model`` declares its own ``build_transforms()`` (currently
+    ``PretrainedVOLOFaceOnlyMultiTask`` and the pretrained-torchvision
+    wrappers -- see ``src/models/pretrained_resnet.py``), returns exactly
+    that model's own resolved eval transform (its own input size, mean,
+    std, interpolation, and crop_pct) -- **never** this project's 128px/
+    IMAGENET-constant default for such a model. Every core (from-scratch)
+    model has no such method, so this falls back to
+    ``EvalTransform(config["dataset"]["image_size"])`` for them, identical
+    to previous behaviour.
+
+    Centralizing this (rather than each script re-implementing
+    ``hasattr(model, "build_transforms")``) is what makes it structurally
+    impossible for calibration/robustness/k-NN/prediction-export to
+    accidentally evaluate a VOLO or pretrained-ResNet checkpoint with the
+    wrong preprocessing -- previously several of these scripts hardcoded
+    ``EvalTransform(config["dataset"]["image_size"])`` unconditionally,
+    which is silently wrong (wrong resolution *and* wrong normalization
+    constants) for such a checkpoint.
+    """
+    if hasattr(model, "build_transforms"):
+        _, eval_transform = model.build_transforms()
+        return eval_transform
+    image_size = config["dataset"]["image_size"] if config else 128
+    return EvalTransform(image_size)
+
+
+def resolve_train_transform(model, config: dict | None = None) -> TrainTransform:
+    """Train-time counterpart of :func:`resolve_eval_transform` -- same
+    model-declares-its-own-transforms resolution, returning the train half
+    of ``model.build_transforms()`` when present."""
+    if hasattr(model, "build_transforms"):
+        train_transform, _ = model.build_transforms()
+        return train_transform
+    image_size = config["dataset"]["image_size"] if config else 128
+    return TrainTransform(image_size)
 
 
 class SimCLRTransform:

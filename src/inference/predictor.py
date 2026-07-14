@@ -16,7 +16,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from src.data.transforms import EvalTransform
+from src.data.transforms import EvalTransform, resolve_eval_transform
 from src.evaluation.calibration import apply_conformal_offset
 from src.evaluation.gradcam import GradCAM, resize_heatmap
 from src.inference.artifacts import LoadedArtifacts
@@ -99,8 +99,11 @@ class Predictor:
                     for i, name in enumerate(self.class_names)
                 ]
             self.confidence_threshold: float = gender_head_cfg.get("confidence_threshold", 0.80)
-            image_size = self.config["dataset"]["image_size"] if "dataset" in self.config else 128
-            self.transform = EvalTransform(image_size)
+            # Model-aware preprocessing (see
+            # src/data/transforms.py::resolve_eval_transform) -- a VOLO/
+            # pretrained-ResNet checkpoint's own resolved transform, never
+            # this project's 128px/IMAGENET-constant default for such a model.
+            self.transform = resolve_eval_transform(self.model, self.config)
             self.gradcam = GradCAM(self.model, self.config["gradcam"]["target_layer"]) if "gradcam" in self.config else GradCAM(self.model)
         else:
             self.class_names = ["gender_label_0", "gender_label_1"]

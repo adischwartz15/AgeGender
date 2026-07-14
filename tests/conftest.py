@@ -6,12 +6,61 @@ with real Kaggle experiment results.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 from PIL import Image
 
-from src.utils.config import load_full_config
+from src.utils.config import REPO_ROOT, load_full_config
+
+# Real, repo-level directories that hold generated artifacts (splits,
+# checkpoints, outputs, results, logs) -- tests must operate exclusively
+# through tmp_path/--set overrides and must NEVER write here. Guards
+# against a real regression found in this project: an earlier draft of
+# tests/test_lock_split.py didn't override paths.splits_dir via --set (the
+# only override tier that beats this repo's own .env DATA_DIR setting --
+# see src/utils/config.py::load_config), so scripts/lock_split.py silently
+# wrote synthetic pytest-fixture data into the real data/splits/ directory.
+_PROTECTED_REAL_DIRS = [
+    REPO_ROOT / "data" / "splits",
+    REPO_ROOT / "checkpoints",
+    REPO_ROOT / "outputs",
+    REPO_ROOT / "results",
+    REPO_ROOT / "logs",
+]
+_ALWAYS_ALLOWED_NAMES = {".gitkeep"}
+
+
+def _snapshot(paths: list[Path]) -> dict[Path, set[Path]]:
+    snapshot = {}
+    for root in paths:
+        if root.exists():
+            snapshot[root] = {p for p in root.rglob("*") if p.is_file()}
+        else:
+            snapshot[root] = set()
+    return snapshot
+
+
+@pytest.fixture(autouse=True)
+def _guard_real_artifact_directories():
+    """Fails the test loudly (rather than leaving silent residue) if it
+    wrote into a real, repo-level artifact directory instead of tmp_path."""
+    before = _snapshot(_PROTECTED_REAL_DIRS)
+    yield
+    after = _snapshot(_PROTECTED_REAL_DIRS)
+    new_files = []
+    for root in _PROTECTED_REAL_DIRS:
+        added = after[root] - before[root]
+        new_files.extend(p for p in added if p.name not in _ALWAYS_ALLOWED_NAMES)
+    assert not new_files, (
+        "Test wrote into a real, repo-level artifact directory instead of an "
+        f"isolated tmp_path: {new_files}. Use --set <path key>=<tmp_path>/... "
+        "(the highest-priority config override tier) rather than a YAML file "
+        "or relying on defaults, since this repo's .env DATA_DIR setting "
+        "silently wins over a plain YAML override."
+    )
 
 
 @pytest.fixture

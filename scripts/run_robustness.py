@@ -31,10 +31,10 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from src.data.transforms import EvalTransform
-from src.evaluation.calibration import load_calibration, validate_calibration_artifact
+from src.data.transforms import resolve_eval_transform
+from src.evaluation.calibration import compute_preprocessing_fingerprint, load_calibration, validate_calibration_artifact
 from src.evaluation.robustness import (
-    apply_corruption, build_robustness_diff_table, compute_degradation, evaluate_condition,
+    apply_corruption, build_robustness_diff_table, compute_degradation, corruption_summary, evaluate_condition,
     iter_corruption_configs, stratified_sample,
 )
 from src.inference.artifacts import load_model_checkpoint
@@ -92,7 +92,13 @@ def main() -> int:
     full_test_df = df[df["split"] == "test"]
     test_df = stratified_sample(full_test_df, args.max_samples, seed=robustness_cfg.get("seed", 42))
 
-    transform = EvalTransform(config["dataset"]["image_size"])
+    # Model-aware preprocessing -- the exact same deterministic clean-eval
+    # transform this checkpoint's own validation/calibration/test paths use
+    # (see src/data/transforms.py::resolve_eval_transform), so the "clean"
+    # robustness baseline row is directly comparable to the ordinary test
+    # metrics for this same checkpoint, and never silently wrong for a
+    # VOLO/pretrained-ResNet checkpoint.
+    transform = resolve_eval_transform(model, config)
     confidence_threshold = config["model"]["gender_head"].get("confidence_threshold", 0.80)
     seed = robustness_cfg.get("seed", 42)
 
@@ -104,8 +110,14 @@ def main() -> int:
     calibration_dir = Path(args.calibration_dir) if args.calibration_dir else _default_calibration_dir(checkpoint_path)
     calibration = load_calibration(calibration_dir) if calibration_dir else None
     if calibration is not None:
+        preprocessing_fingerprint = compute_preprocessing_fingerprint(
+            transform.image_size, transform.mean, transform.std,
+            transform.interpolation, getattr(transform, "crop_pct", 1.0),
+        )
         validate_calibration_artifact(
             calibration, checkpoint_path=checkpoint_path, split_csv_path=splits_path,
+            model_id=getattr(model, "model_id", None), pretrained_source=getattr(model, "pretrained_source", None),
+            preprocessing_fingerprint=preprocessing_fingerprint,
         )
         logger.info("Applying fixed conformal offset=%.4f (from %s) to every condition.", calibration["offset"], calibration_dir)
     else:
@@ -173,7 +185,17 @@ def main() -> int:
         if pct_col in degraded_corrupted_only.columns and not degraded_corrupted_only.empty:
             plot_robustness_curves(degraded_corrupted_only, pct_col, output_dir / f"degradation_{metric}_pct_change.png")
 
+    # Programmatic corruption-type/condition count (never a hand-maintained
+    # doc claim that can silently drift from the actual configs/robustness.yaml).
+    corruption_stats = corruption_summary(robustness_cfg)
+    save_json(corruption_stats, output_dir / "corruption_summary.json")
+
     summary_lines = ["# Robustness Evaluation Summary\n"]
+    summary_lines.append(
+        f"**Corruption coverage:** {corruption_stats['n_corruption_types']} corruption types "
+        f"({', '.join(corruption_stats['corruption_type_names'])}), "
+        f"{corruption_stats['n_total_conditions']} total (type x severity) conditions.\n"
+    )
     clean_row = results_df[results_df["corruption"] == "clean"].iloc[0].to_dict()
     summary_lines.append(f"**Clean baseline:** {clean_row}\n")
     for corruption_name in results_df["corruption"].unique():

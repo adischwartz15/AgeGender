@@ -13,11 +13,15 @@ from pathlib import Path
 import torch
 from torch.utils.data import DataLoader
 
+from src.evaluation.metrics import gender_balanced_accuracy, gender_precision_recall_f1
 from src.losses.multitask_loss import compute_multitask_loss
 from src.models.multitask_model import MultiTaskFaceModel
 from src.training.callbacks import EarlyStopping
 from src.training.checkpointing import BestMetricTracker, save_checkpoint
+from src.training.optim import build_param_groups, build_warmup_cosine_scheduler
+from src.training.progress import emit, format_epoch_report, format_stage_announcement
 from src.training.stages import Stage, build_stage_plan
+from src.utils.provenance import dependency_versions, git_commit_sha
 from src.utils.seed import seed_worker
 
 logger = logging.getLogger(__name__)
@@ -39,44 +43,35 @@ def _build_optimizer(
     training.differential_lr``.
     """
     differential_lr_cfg = differential_lr_cfg or {}
+
     if not differential_lr_cfg.get("enabled", False):
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        return torch.optim.AdamW(trainable_params, lr=lr, weight_decay=weight_decay)
+        def lr_for(_name, _param):
+            return lr
+    else:
+        multiplier = differential_lr_cfg.get("backbone_lr_multiplier", 0.1)
+        backbone_param_ids = {id(p) for p in model.backbone_parameters()}
 
-    multiplier = differential_lr_cfg.get("backbone_lr_multiplier", 0.1)
-    backbone_param_ids = {id(p) for p in model.backbone_parameters()}
-    backbone_params = [p for p in model.parameters() if p.requires_grad and id(p) in backbone_param_ids]
-    other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_param_ids]
+        def lr_for(_name, param):
+            return lr * multiplier if id(param) in backbone_param_ids else lr
 
-    param_groups = []
-    if backbone_params:
-        param_groups.append({"params": backbone_params, "lr": lr * multiplier})
-    if other_params:
-        param_groups.append({"params": other_params, "lr": lr})
-    return torch.optim.AdamW(param_groups, weight_decay=weight_decay)
+    # build_param_groups applies zero weight decay to biases, normalization
+    # parameters, and the scalar log-variance loss-balancing parameters
+    # (ndim <= 1), and decays only the >= 2-D conv/linear weight tensors --
+    # see src/training/optim.py. It also asserts every trainable parameter
+    # lands in exactly one group.
+    groups = build_param_groups(model.named_parameters(), lr_for, weight_decay)
+    return torch.optim.AdamW(groups)
 
 
-def _build_scheduler(optimizer: torch.optim.Optimizer, total_epochs: int, warmup_epochs: int):
-    """Linear warmup for ``warmup_epochs``, then cosine annealing to ~0 for the rest.
-
-    Built from ``torch.optim.lr_scheduler``'s own composable
-    ``LinearLR`` + ``CosineAnnealingLR`` (combined via ``SequentialLR``)
-    rather than a hand-rolled ``LambdaLR`` -- the same warmup-then-cosine
-    shape, expressed with the library's own scheduler classes so it also
-    correctly scales every parameter group's own base LR (needed now that
-    ``_build_optimizer`` can produce more than one group).
-    """
-    warmup_epochs = max(0, min(warmup_epochs, max(0, total_epochs - 1)))
-    cosine_epochs = max(1, total_epochs - warmup_epochs)
-
-    if warmup_epochs == 0:
-        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_epochs)
-
-    warmup = torch.optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=1.0 / warmup_epochs, end_factor=1.0, total_iters=warmup_epochs,
-    )
-    cosine = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cosine_epochs)
-    return torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+def _build_scheduler(
+    optimizer: torch.optim.Optimizer, total_epochs: int, warmup_epochs: int, warmup_start_factor: float = 0.1,
+):
+    """Linear warmup then cosine annealing (see
+    :func:`src.training.optim.build_warmup_cosine_scheduler`). Thin wrapper
+    kept for the import in ``src/training/transfer_trainer.py``; the real
+    warmup fix (an explicit ``warmup_start_factor`` instead of the old
+    ``1.0 / warmup_epochs``) lives in the shared utility."""
+    return build_warmup_cosine_scheduler(optimizer, total_epochs, warmup_epochs, warmup_start_factor)
 
 
 def resolve_loss_balancing(loss_cfg: dict, current_epoch: int) -> tuple[str, dict]:
@@ -160,10 +155,18 @@ class Trainer:
         # (without it, workers can otherwise end up sharing correlated RNG
         # state inherited from the parent process).
         pin_memory = device == "cuda"
+        # Explicit seeded generator for the shuffled train loader, so the
+        # per-epoch batch ordering is reproducible across runs/resumes (not
+        # left to the global RNG state at DataLoader-construction time). The
+        # seed is recorded in the run manifest by the caller.
+        self.dataloader_seed = int(self.training_cfg.get("seed", self.config.get("seed", 42)))
+        self.train_generator = torch.Generator()
+        self.train_generator.manual_seed(self.dataloader_seed)
         self.train_loader = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
             drop_last=len(train_dataset) > batch_size, pin_memory=pin_memory,
             worker_init_fn=seed_worker if num_workers > 0 else None,
+            generator=self.train_generator,
         )
         self.val_loader = DataLoader(
             val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -185,6 +188,7 @@ class Trainer:
 
         self.history: dict[str, list[float]] = {
             "train_loss": [], "val_loss": [], "val_age_mae": [], "val_age_rmse": [], "val_gender_accuracy": [],
+            "val_gender_balanced_accuracy": [], "val_gender_f1": [],
             "val_gender_selective_accuracy": [], "val_gender_coverage": [], "val_gender_abstention": [],
             "age_loss": [], "gender_loss": [], "effective_age_weight": [], "effective_gender_weight": [],
             "log_var_age": [], "log_var_gender": [], "lr": [], "epoch_time_seconds": [],
@@ -196,6 +200,12 @@ class Trainer:
             "gender_accuracy": BestMetricTracker(mode="max"),
             "balanced_score": BestMetricTracker(mode="max"),
         }
+        # Last checkpoint path written for *any* tracked metric this run --
+        # a live progress line's "checkpoint:" field, not the multi-file
+        # per-metric bookkeeping the trackers themselves already do.
+        self._last_checkpoint_path: Path | None = None
+        self.run_manifest_path = self.log_dir / f"{experiment_name}_run_manifest.json"
+        self.last_checkpoint_path = self.checkpoint_dir / f"{experiment_name}_last.pt"
 
     def _loss_mode(self) -> str:
         return self.config["model"]["loss_balancing"]["mode"]
@@ -213,6 +223,7 @@ class Trainer:
         gender_correct, gender_total = 0, 0
         gender_correct_accepted, gender_total_accepted = 0, 0
         gender_confidences = []
+        gender_true_labels, gender_pred_labels = [], []
         any_optimizer_step = False
 
         loss_cfg = self.config["model"]["loss_balancing"]
@@ -295,11 +306,27 @@ class Trainer:
                         gender_correct_accepted += (correct & accepted).sum().item()
                         gender_total_accepted += int(accepted.sum().item())
                         gender_confidences.append(confidence.detach().cpu())
+                        gender_true_labels.append(gender_target[valid].detach().cpu())
+                        gender_pred_labels.append(preds.detach().cpu())
 
         gender_abstention_value = float("nan")
         if gender_confidences:
             all_confidence = torch.cat(gender_confidences)
             gender_abstention_value = float((all_confidence < self.confidence_threshold).float().mean().item())
+
+        # Balanced accuracy / F1 (raw argmax, full coverage -- never
+        # confidence-thresholded) let a live progress line show class-
+        # imbalance-robust performance alongside raw/selective accuracy
+        # without a separate evaluation pass; "n/a" (not 0.0) when no
+        # gender-label batches occurred this epoch or a class is entirely
+        # absent (see src.evaluation.metrics for the exact semantics).
+        gender_balanced_acc_value = float("nan")
+        gender_f1_value = float("nan")
+        if gender_true_labels:
+            y_true = torch.cat(gender_true_labels).numpy()
+            y_pred = torch.cat(gender_pred_labels).numpy()
+            gender_balanced_acc_value = gender_balanced_accuracy(y_true, y_pred)
+            gender_f1_value = gender_precision_recall_f1(y_true, y_pred)["f1"]
 
         metrics = {
             "loss": total_loss / max(1, n_batches),
@@ -312,6 +339,8 @@ class Trainer:
             "age_mae": float(torch.cat(age_abs_errors).mean()) if age_abs_errors else float("nan"),
             "age_rmse": float(torch.sqrt((torch.cat(age_abs_errors) ** 2).mean())) if age_abs_errors else float("nan"),
             "gender_accuracy": gender_correct / max(1, gender_total) if gender_total else float("nan"),
+            "gender_balanced_accuracy": gender_balanced_acc_value,
+            "gender_f1": gender_f1_value,
             "gender_selective_accuracy": (
                 gender_correct_accepted / max(1, gender_total_accepted) if gender_total_accepted else float("nan")
             ),
@@ -322,6 +351,21 @@ class Trainer:
             "optimizer_stepped": any_optimizer_step,
         }
         return metrics
+
+    # The single, centralized main validation selection criterion. Both the
+    # main "best" checkpoint AND early stopping use exactly this score and
+    # mode (higher is better), so the checkpoint reported as "best" is always
+    # the one training actually stopped at / around -- they can never diverge
+    # (the previous bug: checkpoint selection on balanced_score but early
+    # stopping on validation total loss). The separate age-MAE-best and
+    # gender-accuracy-best checkpoints remain as diagnostics only.
+    #
+    # Score S = gender_accuracy - age_mae / age_max, using the raw (non-
+    # selective, coverage-independent) validation gender accuracy -- never
+    # the confidence-thresholded selective accuracy, whose value depends on
+    # the abstention coverage. Selection uses validation data only.
+    SELECTION_METRIC = "balanced_score"
+    SELECTION_MODE = "max"
 
     def _balanced_score(self, age_mae: float, gender_acc: float, age_max: float) -> float:
         if age_mae != age_mae:  # NaN check
@@ -346,8 +390,8 @@ class Trainer:
             f"trainable_params={trainable_params:,}/{total_params:,} | "
             "checkpoint_selection=balanced_score (also tracked: age_mae, gender_accuracy)"
         )
-        print(start_line, flush=True)
-        logger.info(start_line)
+        emit(start_line)
+        self._write_run_manifest(stages, seed_display, trainable_params, total_params)
 
         loss_cfg = self.config["model"]["loss_balancing"]
         if loss_cfg["mode"] == "learned_uncertainty":
@@ -358,8 +402,7 @@ class Trainer:
                     f"training with equal fixed weights for the first {warmup_epochs} epoch(s) "
                     "before switching to learned homoscedastic-uncertainty weighting."
                 )
-                print(warmup_line, flush=True)
-                logger.info(warmup_line)
+                emit(warmup_line)
 
         differential_lr_cfg = self.training_cfg.get("differential_lr", {})
         if differential_lr_cfg.get("enabled", False):
@@ -368,20 +411,33 @@ class Trainer:
                 f"backbone_lr_multiplier={differential_lr_cfg.get('backbone_lr_multiplier', 0.1)} "
                 "(backbone trains at a fraction of the stage LR; adapters/heads use the full stage LR)."
             )
-            print(diff_lr_line, flush=True)
-            logger.info(diff_lr_line)
+            emit(diff_lr_line)
 
         global_epoch = 0
         for stage in stages:
-            stage_line = f"=== {stage.name} (epochs={stage.epochs}, lr={stage.lr:.2e}) ==="
-            print(stage_line, flush=True)
-            logger.info(stage_line)
             self.model.set_stage_trainable(stage.freeze_backbone, stage.unfreeze_layers)
+            emit(format_stage_announcement(self.experiment_name, seed_display, stage.name, self.model))
             optimizer = _build_optimizer(
                 self.model, stage.lr, self.training_cfg.get("weight_decay", 0.05), differential_lr_cfg,
             )
-            scheduler = _build_scheduler(optimizer, stage.epochs, self.training_cfg["scheduler"].get("warmup_epochs", 1))
-            early_stopping = EarlyStopping(patience=self.training_cfg.get("early_stopping_patience", 8), mode="min")
+            scheduler = _build_scheduler(
+                optimizer, stage.epochs, self.training_cfg["scheduler"].get("warmup_epochs", 1),
+                self.training_cfg["scheduler"].get("warmup_start_factor", 0.1),
+            )
+            # Early stopping tracks the SAME centralized selection metric/mode
+            # as checkpoint selection (see SELECTION_METRIC/SELECTION_MODE) --
+            # not validation total loss -- so the two never disagree.
+            early_stopping = EarlyStopping(
+                patience=self.training_cfg.get("early_stopping_patience", 8), mode=self.SELECTION_MODE,
+            )
+            lr_groups = (
+                {
+                    "backbone": stage.lr * differential_lr_cfg.get("backbone_lr_multiplier", 0.1) if not stage.freeze_backbone else None,
+                    "adapters_heads": stage.lr,
+                }
+                if differential_lr_cfg.get("enabled", False)
+                else {"all": stage.lr}
+            )
 
             for _ in range(stage.epochs):
                 start = time.time()
@@ -399,6 +455,8 @@ class Trainer:
                 self.history["val_age_mae"].append(val_metrics["age_mae"])
                 self.history["val_age_rmse"].append(val_metrics["age_rmse"])
                 self.history["val_gender_accuracy"].append(val_metrics["gender_accuracy"])
+                self.history["val_gender_balanced_accuracy"].append(val_metrics["gender_balanced_accuracy"])
+                self.history["val_gender_f1"].append(val_metrics["gender_f1"])
                 self.history["val_gender_selective_accuracy"].append(val_metrics["gender_selective_accuracy"])
                 self.history["val_gender_coverage"].append(val_metrics["gender_coverage"])
                 self.history["val_gender_abstention"].append(val_metrics["gender_abstention"])
@@ -415,41 +473,43 @@ class Trainer:
                 self._maybe_checkpoint("age_mae", val_metrics["age_mae"], global_epoch, val_metrics)
                 self._maybe_checkpoint("gender_accuracy", val_metrics["gender_accuracy"], global_epoch, val_metrics)
                 is_best_balanced = self._maybe_checkpoint("balanced_score", balanced, global_epoch, val_metrics)
+                balanced_tracker = self.trackers["balanced_score"]
 
-                epoch_line = (
-                    f"[{self.experiment_name} | seed={seed_display}] "
-                    f"Epoch {global_epoch:02d}/{total_epochs_planned} | {elapsed:.1f}s | lr={current_lr:.5f} | "
-                    f"train_total={train_metrics['loss']:.4f} train_age={train_metrics['age_loss']:.4f} "
-                    f"train_gender={train_metrics['gender_loss']:.4f} | "
-                    f"val_total={val_metrics['loss']:.4f} val_age_mae={val_metrics['age_mae']:.3f} "
-                    f"val_age_rmse={val_metrics['age_rmse']:.3f} | "
-                    f"val_gender_selective_acc={val_metrics['gender_selective_accuracy']:.3f} "
-                    f"val_coverage={val_metrics['gender_coverage']:.3f} val_abstention={val_metrics['gender_abstention']:.3f} | "
-                    f"selection_score={balanced:.4f} | best={'yes' if is_best_balanced else 'no'} | "
-                    f"early_stop={early_stopping.num_bad_epochs}/{early_stopping.patience}"
+                emit(
+                    format_epoch_report(
+                        experiment_name=self.experiment_name, seed=seed_display, stage_name=stage.name,
+                        epoch=global_epoch, total_epochs=total_epochs_planned,
+                        train_metrics=train_metrics, val_metrics=val_metrics, lr_groups=lr_groups,
+                        selection_score=balanced, is_best=is_best_balanced,
+                        best_score=balanced_tracker.best_value, best_epoch=balanced_tracker.best_epoch,
+                        early_stopping_bad_epochs=early_stopping.num_bad_epochs,
+                        early_stopping_patience=early_stopping.patience, epoch_seconds=elapsed,
+                        checkpoint_path=self._last_checkpoint_path,
+                    )
                 )
-                print(epoch_line, flush=True)
-                logger.info(epoch_line)
 
                 self._write_incremental_history()
                 self._write_status_atomic(stage.name, global_epoch, total_epochs_planned, early_stopping)
+                self._write_last_checkpoint(stage.name, global_epoch, val_metrics)
 
-                if not (val_metrics["loss"] == val_metrics["loss"]):
+                # Early stopping on the centralized selection score (higher is
+                # better), skipping epochs whose score is NaN (a task absent
+                # this run) rather than counting them as non-improvements.
+                if not (balanced == balanced):
                     continue
-                if early_stopping.step(val_metrics["loss"]):
+                if early_stopping.step(balanced):
                     stop_line = f"[{self.experiment_name} | seed={seed_display}] Early stopping triggered at epoch {global_epoch}"
-                    print(stop_line, flush=True)
-                    logger.info(stop_line)
+                    emit(stop_line)
                     break
 
         best_line = (
             f"[{self.experiment_name} | seed={seed_display}] Training complete | "
             f"best scores: {{'age_mae': {self.trackers['age_mae'].best_value}, "
             f"'gender_accuracy': {self.trackers['gender_accuracy'].best_value}, "
-            f"'balanced_score': {self.trackers['balanced_score'].best_value}}}"
+            f"'balanced_score': {self.trackers['balanced_score'].best_value}}} | "
+            f"last checkpoint: {self._last_checkpoint_path}"
         )
-        print(best_line, flush=True)
-        logger.info(best_line)
+        emit(best_line)
 
         return {"history": self.history, "epoch_times": self.epoch_times}
 
@@ -457,11 +517,64 @@ class Trainer:
         if value != value:  # NaN, task absent this run
             return False
         tracker = self.trackers[metric_name]
-        improved = tracker.update(value)
+        improved = tracker.update(value, epoch)
         if improved:
             path = self.checkpoint_dir / f"{self.experiment_name}_best_{metric_name}.pt"
             save_checkpoint(path, self.model, None, epoch, metrics, self.config)
+            self._last_checkpoint_path = path
         return improved
+
+    def _write_run_manifest(self, stages: list[Stage], seed_display, trainable_params: int, total_params: int) -> None:
+        """Written once, at the start of training -- static run metadata
+        (never overwritten per-epoch, unlike status.json/history.*), so a
+        notebook status-table scan can identify which experiment/seed/config
+        a run directory belongs to without waiting for it to finish."""
+        manifest = {
+            "experiment_name": self.experiment_name,
+            "seed": seed_display,
+            "device": self.device,
+            "train_samples": self.train_dataset_size,
+            "val_samples": self.val_dataset_size,
+            "trainable_params": trainable_params,
+            "total_params": total_params,
+            "stages": [
+                {"name": s.name, "epochs": s.epochs, "lr": s.lr, "freeze_backbone": s.freeze_backbone}
+                for s in stages
+            ],
+            "total_epochs_planned": sum(s.epochs for s in stages),
+            "checkpoint_selection_metric": self.SELECTION_METRIC,
+            "git_commit_sha": git_commit_sha(),
+            "dependency_versions": dependency_versions(),
+            "started_at_utc": datetime.datetime.utcnow().isoformat() + "Z",
+        }
+        tmp_path = self.run_manifest_path.with_suffix(".json.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2, default=str)
+        tmp_path.replace(self.run_manifest_path)
+
+    def _write_last_checkpoint(self, stage_name: str, epoch: int, val_metrics: dict) -> None:
+        """Atomically overwrite a single ``*_last.pt`` after every epoch --
+        a live progress/safety artifact (the most recent model state), kept
+        deliberately separate from the per-metric ``_best_*.pt`` files this
+        class already writes. Unlike the transfer-learning trainer's
+        ``last.pt``, this does not carry optimizer/scheduler state and is
+        not wired into a resume path -- the core Trainer has no
+        epoch-level resume today (see docs/notebooks.md "Stage-level
+        restart-safety"); this exists so a notebook status scan always has
+        *some* current-state checkpoint to point at while a run is in
+        progress, even before the first metric improvement is seen."""
+        payload = {
+            "model_state_dict": self.model.state_dict(),
+            "optimizer_state_dict": None,
+            "epoch": epoch,
+            "stage": stage_name,
+            "metrics": val_metrics,
+            "config": self.config,
+            "extra": {"family": "core", "experiment_name": self.experiment_name},
+        }
+        tmp_path = self.last_checkpoint_path.with_suffix(self.last_checkpoint_path.suffix + ".tmp")
+        torch.save(payload, tmp_path)
+        tmp_path.replace(self.last_checkpoint_path)
 
     def _write_incremental_history(self) -> None:
         """Rewrite history.csv/json after every epoch (not just at the end of

@@ -116,14 +116,21 @@ def build_backbone_comparison_table_multi(metrics_by_name: dict[str, dict]) -> p
 
 
 def aggregate_seed_metrics(per_seed_metrics: list[dict], keys: tuple[str, ...] = _SEED_METRIC_KEYS) -> dict:
-    """Compute mean +/- std across N seed runs' test-metric dicts.
+    """Compute mean +/- **sample** std across N seed runs' test-metric dicts.
 
     Returns ``{key: {"mean": ..., "std": ..., "n_seeds": N}}`` for each
     key present (and numeric) in at least one provided dict; missing
     values for a given seed are simply excluded from that key's mean/std
-    rather than treated as zero. With fewer than 2 seed runs, ``std`` is
-    reported as ``None`` (not 0.0) so callers can render an honest
-    "insufficient runs" message instead of a misleadingly precise number.
+    rather than treated as zero (so each metric carries its own
+    ``n_seeds``, not a single row-level count -- see the final-run reporting
+    protocol). With fewer than 2 seed runs, ``std`` is reported as ``None``
+    (not 0.0) so callers can render an honest "insufficient runs" message
+    instead of a misleadingly precise number.
+
+    The reported std is the **sample** standard deviation (``ddof=1``), the
+    correct estimator for the population std from a small number of seed
+    runs -- the population std (``ddof=0``) would systematically
+    understate run-to-run variability for the final 3-seed table.
     """
     result: dict[str, dict] = {}
     n_seeds = len(per_seed_metrics)
@@ -133,7 +140,7 @@ def aggregate_seed_metrics(per_seed_metrics: list[dict], keys: tuple[str, ...] =
             continue
         result[key] = {
             "mean": float(np.mean(values)),
-            "std": float(np.std(values)) if len(values) >= 2 else None,
+            "std": float(np.std(values, ddof=1)) if len(values) >= 2 else None,
             "n_seeds": len(values),
         }
     result["_n_seed_runs"] = n_seeds
@@ -159,3 +166,70 @@ def build_seed_aggregate_table(aggregates: dict[str, dict]) -> pd.DataFrame:
                 row[key] = f"{stats['mean']:.3f} +/- {stats['std']:.3f}"
         rows.append(row)
     return pd.DataFrame(rows)
+
+
+_TABLE_B_COLUMNS = [
+    ("model", "Model"),
+    ("experiment_category", "Experiment category"),
+    ("initialization", "Initialization"),
+    ("backbone", "Backbone"),
+    ("adapters", "Adapters"),
+    ("loss_balancing", "Loss balancing"),
+    ("input_size", "Input size"),
+    ("age_mae", "Age MAE"),
+    ("age_rmse", "Age RMSE"),
+    ("age_median_ae", "Age median AE"),
+    ("age_cs5", "CS@5"),
+    # Explicitly labelled "selective" (the confidence-thresholded accuracy,
+    # denominator = accepted predictions only) -- never called plain
+    # "accuracy", which this is not (see gender_balanced_accuracy below for
+    # the raw-argmax, full-coverage classification metric).
+    ("gender_accuracy", "Gender selective acc (tau=0.80)"),
+    ("gender_balanced_accuracy", "Gender balanced acc (raw, full coverage)"),
+    ("gender_f1", "Gender F1"),
+    ("total_params", "Params"),
+    ("trainable_params", "Trainable params"),
+]
+_TABLE_B_SEED_SENSITIVE_KEYS = (
+    "age_mae", "age_rmse", "age_median_ae", "age_cs5", "gender_accuracy", "gender_balanced_accuracy", "gender_f1",
+)
+
+
+def build_transfer_learning_table(rows: list[dict]) -> pd.DataFrame:
+    """Table B: best from-scratch model vs. the supplementary ImageNet-pretrained
+    VOLO-D1 transfer-learning experiment.
+
+    Structurally separate from :func:`build_architecture_ablation_table`
+    (Table A) -- this function is never called with, or merged into,
+    Table A's rows, since Table B compares systems that differ in
+    initialization, capacity, input resolution, and optimizer/schedule
+    simultaneously, not a controlled ablation.
+
+    Each element of ``rows`` is one already-computed model's flat metric
+    dict (see ``scripts/run_transfer_learning.py`` for how a row is
+    assembled from real ``evaluate_checkpoint()`` / ``parameter_breakdown()``
+    output, optionally seed-aggregated via :func:`aggregate_seed_metrics`).
+    Missing keys render as ``None``, never fabricated.
+
+    When a row's ``n_seeds`` is 1 (or absent), its seed-sensitive metric
+    values are annotated "(n=1, no std)" -- the same convention
+    :func:`build_seed_aggregate_table` already uses -- so a reader cannot
+    mistake a single run for a variance-estimated result. With >=2 seeds
+    and a matching ``{key}_std`` present, the value is rendered as
+    ``mean +/- std (n=N)``.
+    """
+    table_rows = []
+    for row in rows:
+        n_seeds = row.get("n_seeds", 1)
+        table_row = {}
+        for key, label in _TABLE_B_COLUMNS:
+            value = row.get(key)
+            if key in _TABLE_B_SEED_SENSITIVE_KEYS and isinstance(value, (int, float)):
+                std = row.get(f"{key}_std")
+                if n_seeds and n_seeds >= 2 and std is not None:
+                    value = f"{value:.3f} +/- {std:.3f} (n={n_seeds})"
+                else:
+                    value = f"{value:.3f} (n=1, no std)"
+            table_row[label] = value
+        table_rows.append(table_row)
+    return pd.DataFrame(table_rows)

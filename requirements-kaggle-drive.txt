@@ -1,0 +1,10 @@
+# Optional extra for the optional, secure Kaggle -> Google Drive backup of
+# the transfer-learning extension's artifacts only
+# (src/utils/kaggle_drive_backup.py). Not required for training on Kaggle
+# (which always saves under /kaggle/working regardless), for Colab, or for
+# any core (from-scratch) experiment -- see docs/transfer_learning.md
+# "Secret handling".
+#
+#     pip install -r requirements-kaggle-drive.txt   # only if ENABLE_KAGGLE_DRIVE_BACKUP = True
+google-api-python-client>=2.0,<3.0
+google-auth>=2.0,<3.0

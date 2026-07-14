@@ -35,6 +35,14 @@ PlainDeep18NoSkip (Experiment 0b) and run the full comparison suite
 the live configuration options (`RUN_PROFILE`, `SEEDS`, `RUN_ROBUSTNESS`,
 `RUN_GRADCAM`, `RUN_KNN`, `RUN_MULTI_SEED`, etc.).
 
+Both notebooks also have an unnumbered "Supplementary Experiment" section
+after the core numbered sections, with its own optional, off-by-default
+toggles (`RUN_TRANSFER_LEARNING_EXTENSION`, `RUN_PRETRAINED_RESNET_EXTENSION`,
+`RUN_NONPARAMETRIC_BASELINES`) for the VOLO-D1 / pretrained-ResNet-18/50 /
+non-parametric baselines covered in `docs/transfer_learning.md` and
+`docs/nonparametric_baselines.md` -- none of these run by default, and none
+affect the core numbered sections' output.
+
 ## Stage-level restart-safety
 
 With `FORCE_RERUN=False` and `RESUME_RUN_ID` set to a previous run's

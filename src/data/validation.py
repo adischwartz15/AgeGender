@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 from PIL import Image, UnidentifiedImageError
 
-from src.data.split_utils import assert_no_leakage, split_dataframe
+from src.data.split_utils import assert_no_leakage, split_dataframe, stratified_split_dataframe
 from src.utils.io import file_sha256, save_json
 
 logger = logging.getLogger(__name__)
@@ -137,6 +137,33 @@ def validate_and_split(df: pd.DataFrame, data_config: dict) -> tuple[pd.DataFram
     assert_no_leakage(split_df)
 
     report["split_counts"] = split_df["split"].value_counts().to_dict()
+    return split_df, report
+
+
+def validate_and_stratified_split(df: pd.DataFrame, data_config: dict) -> tuple[pd.DataFrame, dict]:
+    """Same contract as :func:`validate_and_split`, but using the locked,
+    age-bin x gender-label stratified split (:func:`~src.data.split_utils.stratified_split_dataframe`)
+    instead of the plain (unstratified) row/subject shuffle -- see
+    ``scripts/lock_split.py`` and ``docs/reproducibility.md`` "Locked
+    stratified split" for why this is the split every final experiment uses.
+    """
+    validation_cfg = data_config.get("validation", {})
+    split_cfg = data_config.get("split", {})
+
+    clean_df, report = validate_dataset(df, validation_cfg)
+    split_df, stratification_report = stratified_split_dataframe(
+        clean_df,
+        train_fraction=split_cfg.get("train_fraction", 0.60),
+        validation_fraction=split_cfg.get("validation_fraction", 0.15),
+        calibration_fraction=split_cfg.get("calibration_fraction", 0.10),
+        test_fraction=split_cfg.get("test_fraction", 0.15),
+        seed=split_cfg.get("seed", 42),
+        subject_level_if_available=split_cfg.get("subject_level_if_available", True),
+    )
+    assert_no_leakage(split_df)
+
+    report["split_counts"] = split_df["split"].value_counts().to_dict()
+    report["stratification"] = stratification_report
     return split_df, report
 
 

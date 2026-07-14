@@ -32,8 +32,8 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.data.dataset import FaceMultiTaskDataset
-from src.data.transforms import EvalTransform
-from src.evaluation.calibration import evaluate_calibration_effect, fit_and_save_calibration
+from src.data.transforms import resolve_eval_transform
+from src.evaluation.calibration import compute_preprocessing_fingerprint, evaluate_calibration_effect, fit_and_save_calibration
 from src.inference.artifacts import load_model_checkpoint
 from src.utils.config import REPO_ROOT, resolve_device
 from src.utils.io import checkpoint_experiment_name, save_json
@@ -86,9 +86,12 @@ def calibrate_checkpoint(
         return None
     df = pd.read_csv(splits_path)
 
-    calibration_dataset = FaceMultiTaskDataset(
-        df[df["split"] == "calibration"], EvalTransform(config["dataset"]["image_size"])
-    )
+    # Model-aware preprocessing: a VOLO/pretrained-ResNet checkpoint's own
+    # resolved transform (input size, mean/std, interpolation, crop_pct),
+    # never this project's 128px/IMAGENET-constant default for such a model
+    # -- see src/data/transforms.py::resolve_eval_transform.
+    eval_transform = resolve_eval_transform(model, config)
+    calibration_dataset = FaceMultiTaskDataset(df[df["split"] == "calibration"], eval_transform)
     if len(calibration_dataset) == 0:
         logger.error(
             "Calibration split is empty. Re-run 'make prepare-data' with the current "
@@ -103,14 +106,20 @@ def calibrate_checkpoint(
 
     test_df = df[df["split"] == "test"]
     calibration_dir_resolved = REPO_ROOT / calibration_dir if calibration_dir else REPO_ROOT / config["calibration"]["output_dir"]
+    preprocessing_fingerprint = compute_preprocessing_fingerprint(
+        eval_transform.image_size, eval_transform.mean, eval_transform.std,
+        eval_transform.interpolation, getattr(eval_transform, "crop_pct", 1.0),
+    )
     artifact = fit_and_save_calibration(
         ages_cal[mask_cal], q10_cal[mask_cal], q90_cal[mask_cal], alpha, calibration_dir_resolved,
         checkpoint_path=checkpoint_path, split_csv_path=splits_path,
         test_sample_ids=test_df["image_path"].tolist(), experiment=experiment_name, seed=seed,
+        model_id=getattr(model, "model_id", None), pretrained_source=getattr(model, "pretrained_source", None),
+        preprocessing_fingerprint=preprocessing_fingerprint,
     )
     logger.info("Calibration artifact: %s", artifact)
 
-    test_dataset = FaceMultiTaskDataset(test_df, EvalTransform(config["dataset"]["image_size"]))
+    test_dataset = FaceMultiTaskDataset(test_df, eval_transform)
     q10_test, q90_test, ages_test, mask_test = _predict_age(model, test_dataset, device)
     if mask_test.any():
         effect = evaluate_calibration_effect(ages_test[mask_test], q10_test[mask_test], q90_test[mask_test], artifact["offset"])

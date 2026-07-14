@@ -23,6 +23,8 @@ checkpoints/*
 !checkpoints/.gitkeep
 outputs/*
 !outputs/.gitkeep
+results/*
+!results/.gitkeep
 
 # Kaggle credentials - never commit
 kaggle.json

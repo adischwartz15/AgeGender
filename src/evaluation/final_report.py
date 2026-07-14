@@ -112,7 +112,7 @@ def _build_seed_aggregate_section(outputs_dir: Path) -> str:
     groups = _discover_seed_metrics(outputs_dir)
     if not groups:
         lines.append(
-            _MISSING.format(cmd="python scripts/run_seeds.py --experiment <name> --seeds 42,43,44") + "\n"
+            _MISSING.format(cmd="python scripts/run_seeds.py --experiment <name> --seeds 42,123,2026") + "\n"
         )
         return "\n".join(lines)
 

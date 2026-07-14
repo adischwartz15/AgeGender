@@ -53,6 +53,68 @@ in `configs/experiments.yaml` reads this same file, so Experiments 0, A-F
 are comparable: differences in results reflect the architecture/training
 change under test, not a different data split.
 
+## Stratified, locked split
+
+`scripts/lock_split.py` generates and locks the split used by every final
+experiment (core suite, VOLO, pretrained-ResNet, non-parametric baselines):
+
+```bash
+python scripts/lock_split.py                  # generate + lock (no-op if a valid lock already exists)
+python scripts/lock_split.py --force-resplit  # back up the existing split, then regenerate
+```
+
+- **Stratified** by age bin x gender label
+  (`src/data/split_utils.py::stratified_split_dataframe`, `AGE_BIN_EDGES`),
+  using largest-remainder allocation so every stratum's train/val/
+  calibration/test proportions are as close to the target fractions as
+  integer counts allow -- not just a global random shuffle.
+- **Subject-level grouping preserved where the metadata makes it available**,
+  same as the plain (non-stratified) split. **UTKFace itself provides no
+  reliable subject/identity field** -- filenames encode only age/gender/race/
+  timestamp, not a person ID -- so identity-disjointness between splits
+  **cannot be guaranteed** from this dataset alone; this caveat is recorded
+  verbatim in every `split_manifest.json`'s `identity_disjointness_caveat`
+  field, not just in this doc.
+- **Locked, not silently regenerated.** Once `data/splits/split_manifest.json`
+  validates against the actual split file's SHA-256, `lock_split.py` reuses
+  it and does nothing further; every downstream script that reads the split
+  records this same hash, so a report can prove which exact split every
+  number came from. Regenerating requires the explicit `--force-resplit`
+  flag, **or** happens automatically if the existing split/manifest fails
+  validation (missing, corrupted, or tampered) -- either way, the previous
+  split is always **backed up first** (copied, never deleted) to
+  `data/splits/.backup/pre_regenerate_<UTC-timestamp>/` before anything is
+  overwritten.
+- **Atomic.** The split CSV and manifest are written to a `.tmp` path and
+  `os.replace()`d into place -- a crash mid-write can never leave a
+  half-written split on disk.
+- **`split_manifest.json` records**: split method/seed/fractions,
+  stratification fields and age-bin edges, source-metadata fingerprint and
+  row count, the split file's own SHA-256, per-split and per-stratum
+  counts, zero-allocation warnings (a stratum too small for its target
+  fractions to all round to >=1), a near-duplicate image audit summary
+  (perceptual-hash based, see below), the identity-disjointness caveat,
+  git commit SHA, dependency versions, and a creation timestamp.
+
+### Near-duplicate audit
+
+`src/data/near_duplicate_audit.py` flags image pairs across splits that are
+likely near-duplicates (e.g. a resized or lightly re-encoded copy of the
+same photo) via a difference hash (dHash) and Hamming-distance threshold,
+bucketed by hash prefix for datasets too large for an exact O(n^2) scan
+(below `_EXACT_SCAN_THRESHOLD` images, every pair is compared exactly
+instead, since bucketing itself is approximate). Results are summarized in
+`split_manifest.json`'s `near_duplicate_audit_summary` and
+`duplicate_path_audit`/`exact_hash_duplicate_audit` fields -- this is a
+disclosure mechanism, not an automatic filter: candidates are reported, not
+silently removed from the split.
+
+Every final experiment (core, VOLO, pretrained-ResNet, non-parametric)
+records the split's SHA-256 in its own output manifest and, where the
+downstream tooling supports it (non-parametric baseline evaluation,
+conformal calibration), refuses to proceed if that hash doesn't match the
+currently locked split.
+
 ## Config-driven, not hardcoded
 
 All architecture, training, and evaluation choices live in `configs/*.yaml`.
