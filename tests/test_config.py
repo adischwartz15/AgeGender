@@ -48,14 +48,12 @@ def test_env_config_overrides_coerces_numeric_types(monkeypatch):
     monkeypatch.setenv("AGE_MIN", "0")
     monkeypatch.setenv("AGE_MAX", "90")
     monkeypatch.setenv("GENDER_CONFIDENCE_THRESHOLD", "0.75")
-    monkeypatch.setenv("API_PORT", "9000")
 
     overrides = env_config_overrides()
     assert overrides["model"]["age_head"]["age_min"] == 0
     assert overrides["model"]["age_head"]["age_max"] == 90
+    assert isinstance(overrides["model"]["age_head"]["age_max"], int)
     assert overrides["model"]["gender_head"]["confidence_threshold"] == 0.75
-    assert overrides["api"]["port"] == 9000
-    assert isinstance(overrides["api"]["port"], int)
 
 
 def test_env_config_overrides_dataset_source_and_checkpoint_dir(monkeypatch):
@@ -63,13 +61,11 @@ def test_env_config_overrides_dataset_source_and_checkpoint_dir(monkeypatch):
     monkeypatch.setenv("DATASET_SOURCE", "csv")
     monkeypatch.setenv("CHECKPOINT_DIR", "/tmp/my_checkpoints")
     monkeypatch.setenv("OUTPUT_DIR", "/tmp/my_outputs")
-    monkeypatch.setenv("API_HOST", "127.0.0.1")
 
     overrides = env_config_overrides()
     assert overrides["dataset"]["source"] == "csv"
     assert overrides["paths"]["checkpoint_dir"] == "/tmp/my_checkpoints"
     assert overrides["paths"]["output_dir"] == "/tmp/my_outputs"
-    assert overrides["api"]["host"] == "127.0.0.1"
 
 
 def test_env_config_overrides_data_dir_cascades_to_subdirs(monkeypatch):

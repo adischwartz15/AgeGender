@@ -36,8 +36,8 @@ def load_env_file(env_path: str | os.PathLike | None = None) -> None:
     Values already set in the real environment are never overwritten
     (``override=False``), so an explicit ``export`` / Colab
     ``os.environ[...] = ...`` always wins over a stale ``.env`` file.
-    Call this once near the start of any entry point (API, CLI script)
-    that reads Kaggle credentials, GENDER_LABEL_0/1, etc. from the
+    Call this once near the start of any entry point (CLI script) that
+    reads Kaggle credentials, GENDER_LABEL_0/1, etc. from the
     environment -- nothing in this repo reads ``.env`` automatically
     otherwise.
     """
@@ -53,8 +53,7 @@ def load_env_file(env_path: str | os.PathLike | None = None) -> None:
 # snapshot saved at its own training time (see src/inference/artifacts.py),
 # so changing these after a model is trained cannot desync a checkpoint's
 # saved age range / confidence threshold from what it actually trained
-# with -- these only matter for a *new* training run or for API-level
-# settings (host/port) that aren't baked into any checkpoint.
+# with -- these only matter for a *new* training run.
 _ENV_OVERRIDE_MAP: dict[str, str] = {
     "DATASET_SOURCE": "dataset.source",
     "GENDER_CONFIDENCE_THRESHOLD": "model.gender_head.confidence_threshold",
@@ -62,8 +61,6 @@ _ENV_OVERRIDE_MAP: dict[str, str] = {
     "AGE_MAX": "model.age_head.age_max",
     "CHECKPOINT_DIR": "paths.checkpoint_dir",
     "OUTPUT_DIR": "paths.output_dir",
-    "API_HOST": "api.host",
-    "API_PORT": "api.port",
 }
 
 
@@ -184,14 +181,13 @@ def load_config(
 def load_full_config(overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """Convenience loader that merges all standard config files.
 
-    Merges default -> data -> model -> training -> api, which is the
-    combination most training/eval scripts need.
+    Merges default -> data -> model -> training, which is the combination
+    most training/eval scripts need.
     """
     return load_config(
         CONFIG_DIR / "data.yaml",
         CONFIG_DIR / "model.yaml",
         CONFIG_DIR / "training.yaml",
-        CONFIG_DIR / "api.yaml",
         overrides=overrides,
     )
 

@@ -1,9 +1,5 @@
 # Evaluation Metric Definitions
 
-All formulas below are implemented in `src/evaluation/metrics.py` unless
-noted otherwise. This page is the canonical reference; other documents
-link here instead of redefining these metrics.
-
 ## Age (regression)
 
 - **MAE**: mean absolute error, q50 vs. true age.
@@ -20,20 +16,11 @@ link here instead of redefining these metrics.
 - **Tail-error rates**: fraction of samples with absolute age error
   exceeding 5 / 10 / 15 / 20 years.
 - **Per-age-bucket metrics** (`age_uncertainty_by_bucket`): MAE, coverage,
-  and interval width computed within fixed age ranges. Two different
-  bucket schemes are used in this codebase for two different purposes --
-  do not conflate them:
-  - **Evaluation report buckets** (`scripts/evaluate.py`,
-    `src/evaluation/metrics.py`, default): `[0-10, 10-20, 20-30, 30-40,
-    40-50, 50-60, 60-70, 70-80, 80+]`.
-  - **Backbone-comparison tail-error buckets**
-    (`src/evaluation/backbone_comparison.py`, used by
-    `scripts/compare_backbones.py`): `[0-12, 13-19, 20-34, 35-49, 50-64,
-    65+]`, chosen to roughly track developmental age ranges.
+  and interval width computed within fixed age ranges. 
 
 **Raw vs. calibrated intervals.** The q10-q90 interval is a nominal 80%
 interval (`calibration.alpha: 0.10` in `configs/training.yaml`) as output
-directly by the trained quantile head -- its *empirical* coverage on held
+directly by the trained quantile head - its *empirical* coverage on held
 out data is not guaranteed to match 80% (or any other rate) until a
 conformal offset has been fit and applied (see `docs/calibration.md`).
 Always state explicitly whether a reported interval/coverage number is
@@ -43,56 +30,24 @@ raw or calibrated; never call a raw q10-q90 interval "a 90% interval."
 
 The gender-label head abstains ("Not sure") whenever its top softmax
 probability falls below `confidence_threshold` (default 0.80,
-`configs/model.yaml: model.gender_head.confidence_threshold`). Four
-related-but-distinct numbers are always reported together (never one
-alone) -- see `docs/model_card.md` ("Abstention behavior") for the full
-rationale:
-
-- **Selective accuracy** (`gender_accuracy`): accuracy over
-  **non-abstained** predictions only (denominator excludes abstentions).
+`configs/model.yaml: model.gender_head.confidence_threshold`). 
+- **Selective accuracy** (`gender_accuracy`): accuracy over **non-abstained**     predictions only (denominator excludes abstentions).
 - **Coverage** (`gender_coverage`): fraction of samples actually
   answered, `1 - abstention_rate`.
 - **Abstention rate** (`abstention_rate`): fraction returned as "Not
   sure."
 - **Effective accuracy** (`gender_effective_accuracy`): correct-and-accepted
   predictions divided by **all** samples (denominator includes
-  abstentions) -- "how often a user actually gets a correct answer out of
+  abstentions) - "how often a user actually gets a correct answer out of
   everything asked."
 
 A model can have excellent selective accuracy while abstaining on every
-difficult case, which would look poor on effective accuracy -- reporting
+difficult case, which would look poor on effective accuracy - reporting
 selective accuracy alone would hide that trade-off. Whenever this
 repository or its documentation reports a bare "gender accuracy" number,
 it means **selective accuracy** unless explicitly labeled otherwise;
 always check whether coverage/effective accuracy are reported alongside
 it before treating the number as a full picture.
-
-### Balanced accuracy vs. selective accuracy -- do not conflate
-
-`gender_balanced_accuracy` (`src/evaluation/metrics.py`) is the
-class-balanced accuracy over **every** sample at **full coverage**
-(`confidence_threshold=0.0` -- nothing abstains) -- a different number from
-selective accuracy above, which excludes abstained samples at the
-*configured* threshold (default 0.80) and is not class-balanced. Table B
-(`src/evaluation/comparison.py`) labels these as two distinct columns,
-"Gender selective acc (tau=0.80)" and "Gender balanced acc (raw, full
-coverage)" -- never collapsed into one "gender accuracy" column, since they
-answer different questions (deployment-realistic selective performance vs.
-a class-imbalance-robust full-coverage summary).
-
-`src/evaluation/selective.py::gender_selective_prediction_report` computes
-selective accuracy, coverage, abstention rate, effective accuracy, balanced
-accuracy, precision/recall/F1, ROC-AUC, and the AURC/risk-coverage curve
-together in one call at the configured threshold;
-`full_coverage_gender_report` is the same function at
-`confidence_threshold=0.0`, for the abstention-off comparison point. Both
-are **evaluation-only** analyses over an already-trained model's saved
-predictions/probabilities -- neither ever trains, fine-tunes, or otherwise
-constructs a separate "no-abstention model." Abstention is a decision rule
-applied at evaluation time to one model's output probabilities, not a
-different training configuration (see `tests/test_abstention_evaluation_only.py`,
-which proves this by monkeypatching `Trainer.train`/`TransferTrainer.train`
-to raise and confirming neither is ever reached by this analysis path).
 
 ## Selective prediction / AURC (both tasks)
 
@@ -100,7 +55,6 @@ to raise and confirming neither is ever reached by this analysis path).
 max class probability, per-sample loss = 0/1 error) and age (confidence =
 `-(q90 - q10)`, narrower interval = more confident, per-sample loss = MAE
 or RMSE):
-
 - **Risk-coverage curve**: sweeps coverage from low to full, keeping the
   most-confident fraction of samples at each step, and reports the mean
   loss ("risk") over that fraction.
@@ -116,33 +70,3 @@ or RMSE):
   on the AURC difference is treated as such (see
   `docs/backbone_comparison.md` and `docs/final_evaluation_protocol.md`).
 
-## Per-sample prediction export
-
-`scripts/evaluate.py::evaluate_checkpoint` also exports every individual
-test-set prediction via `src/evaluation/predictions.py::export_predictions`
--- one row per sample (true/predicted age, quantiles, calibrated interval,
-predicted gender label, class probabilities, confidence, abstention flag,
-correctness flags), written atomically alongside a sidecar provenance
-manifest (checkpoint hash, split hash, calibration artifact hash, model
-family/backbone/pretrained source, preprocessing config, git commit,
-dependency versions). `recompute_aggregate_metrics_from_predictions`
-recomputes the same MAE/accuracy/coverage numbers directly from this
-exported per-sample file -- proven by test
-(`tests/test_predictions_export.py`) to reproduce the aggregate metrics
-`scripts/evaluate.py` reports in the same run exactly, so the per-sample
-export can be trusted as a faithful, auditable record rather than a
-separate, potentially-drifted computation.
-
-## Where these are produced
-
-- `scripts/evaluate.py` -- single-checkpoint test-set evaluation (MAE,
-  RMSE, R2, raw + calibrated coverage/width, per-bucket uncertainty,
-  gender confusion matrix/abstention, optional k-NN comparison), plus the
-  per-sample prediction export above.
-- `scripts/run_robustness.py` -- the same core metrics under corruption
-  (see `docs/robustness.md`).
-- `scripts/compare_backbones.py` -- selective-risk/AURC/bootstrap/tail-error
-  analysis across two or more checkpoints (see `docs/backbone_comparison.md`).
-- `scripts/generate_architecture_report.py` -- gradient interference (task
-  cosine similarity) and representation similarity (linear CKA); see
-  `docs/architecture_analysis.md`.

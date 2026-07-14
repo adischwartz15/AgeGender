@@ -11,8 +11,8 @@ scalar interval-expansion offset via conformalized quantile regression
 This guarantees (marginally, under exchangeability) that the calibrated
 interval covers the true value with probability >= 1 - alpha on held-out
 data drawn from the same distribution. Intervals are only ever described
-as "calibrated" in the API/frontend when a calibration artifact produced
-by this procedure actually exists and loaded successfully.
+as "calibrated" when a calibration artifact produced by this procedure
+actually exists and loaded successfully.
 """
 
 from __future__ import annotations

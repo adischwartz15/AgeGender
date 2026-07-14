@@ -256,11 +256,11 @@ answers, deeper technical answers, follow-ups, and key files.
 
 ---
 
-## 24-25. API / Frontend
+## 24-25. Face Detection
 
 ### Q33: What happens when no face is detected?
-- **Oral**: "The API declines to predict — returns age=null, gender=null, face_detected=false with a warning. It doesn't guess on non-face images."
-- **Key file**: `src/inference/predictor.py` L131-146
+- **Oral**: "Prediction is declined rather than guessed — age and gender come back as null/None with a warning. The system doesn't guess on non-face images."
+- **Key file**: `src/inference/face_detection.py`
 
 ---
 
@@ -336,12 +336,12 @@ Trade-off: enough samples for accurate quantile estimation, but doesn't reduce t
 ### Q48: Why not use a learned confidence threshold?
 Simplicity; 0.80 is interpretable and avoids overfitting the threshold to validation data.
 
-### Q49: What does the API disclaimer say?
+### Q49: What does the project disclaimer say?
 "Predictions may be inaccurate, biased, or unreliable. Gender-related output reflects labels in the training dataset and is not a determination of identity."
 
 ### Q50: How is the calibration artifact validated?
 SHA-256 of the checkpoint and split file are recorded; mismatch raises `CalibrationMismatchError`.
 
-### Q51-Q80: [Additional questions on training stages, early stopping patience, batch size selection, data augmentation choices, Kaiming initialization, zero-init residual branches, weight decay, gradient clipping value, cosine annealing T_max, per-bucket age analysis, confusion matrix interpretation, AURC computation, bootstrap CI methodology, frontend technology choices, API CORS configuration, Pydantic schema design, face margin ratio selection, multi-pass cascade strategy, etc.]
+### Q51-Q80: [Additional questions on training stages, early stopping patience, batch size selection, data augmentation choices, Kaiming initialization, zero-init residual branches, weight decay, gradient clipping value, cosine annealing T_max, per-bucket age analysis, confusion matrix interpretation, AURC computation, bootstrap CI methodology, face margin ratio selection, multi-pass cascade strategy, etc.]
 
 Each follows the same format: oral answer, deeper answer, follow-up, key file, warning.

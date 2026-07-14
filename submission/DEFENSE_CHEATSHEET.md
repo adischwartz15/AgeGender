@@ -59,6 +59,6 @@
 | Training loop | `src/training/trainer.py` |
 | Calibration | `src/evaluation/calibration.py` |
 | Metrics | `src/evaluation/metrics.py` |
-| Inference | `src/inference/predictor.py` |
+| Face detection | `src/inference/face_detection.py` |
 | Results | `docs/results.md` |
 | Experiment plan | `docs/experiment_plan.md` |

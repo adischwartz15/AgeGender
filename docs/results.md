@@ -1,29 +1,4 @@
-# Results (One Real Training Run)
-
-Real numbers from an actual training run on UTKFace (via the Kaggle API,
-default configs unless noted) -- not fabricated placeholders. This is a
-point-in-time snapshot committed to the repository; it is **not**
-regenerated automatically (unlike `docs/architecture_analysis_generated.md`,
-which is gitignored and produced fresh by `make architecture-report`).
-
-Reproduce with `make experiments`, `make build-knn CHECKPOINT=...`,
-`make evaluate CHECKPOINT=...` (always includes the k-NN comparison),
-`make robustness CHECKPOINT=...`, and `make architecture-report
-CHECKPOINT=...`; see `docs/architecture_analysis_generated.md` for the
-full, regenerated report after you run the pipeline yourself, and
-`docs/architecture_analysis.md` for the methodology behind every number
-below.
-
-**Scope.** All numbers below come from one checkpoint
-(`exp_d_shared_adapters_learned_balance`, the shared-backbone + adapters +
-learned-loss-balancing architecture -- see `docs/experiment_plan.md`),
-one dataset (UTKFace), and one train/validation/calibration/test split.
-They are not a claim about performance on any other dataset, population,
-camera, or checkpoint, and none of them is a multi-seed mean (see
-`docs/final_evaluation_protocol.md` for the pre-registered three-seed
-protocol used for the project's actual reported comparisons). See
-`docs/data_card.md` and `docs/model_card.md` for the demographic-coverage
-and generalization caveats that apply to every table here.
+# Results 
 
 ## Architecture parameter comparison (Experiments A-D)
 
@@ -43,29 +18,41 @@ checkpoint and isn't included here yet -- the sections below reflect one
 specific (shared-backbone + adapters) checkpoint, not a cross-experiment
 comparison.*
 
-## Parametric model vs. k-NN baseline (shared-backbone + adapters model)
+## Parametric Model vs. k-NN Baseline (Experiment E)
 
-| Metric | Parametric | k-NN (k=15) |
-|---|---|---|
-| Age MAE | 5.71 | 5.79 |
-| Age RMSE | 8.32 | 8.53 |
-| q10-q90 interval coverage (raw, uncalibrated) | 0.79 | 0.91 |
-| Mean interval width | 16.79 | 26.88 |
-| Gender-label selective accuracy | 0.970 | 0.966 |
-| Abstention rate | 0.192 | 0.179 |
-| Latency per image (ms) | 1.8 | 2.0 |
+Same trained checkpoint (shared backbone + adapters, Experiment D),
+compared two ways: its own quantile/classification heads ("Parametric")
+versus a k-NN search (k=15) over that same checkpoint's embeddings
+("k-NN") -- isolating how much of the performance comes from the learned
+heads themselves, not just the learned representation.
 
-The q10-q90 interval is nominally an 80% interval (`calibration.alpha:
-0.10` in `configs/training.yaml`) before conformal calibration is applied
--- neither row above is calibrated, so 0.79/0.91 are raw empirical
-coverage, not a calibration guarantee. Gender-label accuracy is
-**selective accuracy**: computed only over non-abstained predictions (see
-`docs/evaluation.md` for the distinction from coverage and effective
-accuracy). The k-NN baseline is competitive on gender-label accuracy and
-reaches *higher* raw interval coverage than the (uncalibrated) parametric
-model, at the cost of much wider intervals -- consistent with a
-non-parametric method being more conservative rather than more precise
-here.
+| Metric | Parametric | k-NN (k=15) | Edge |
+|---|---:|---:|---|
+| Age MAE (lower is better) | **5.71** | 5.79 | Parametric, by 1.4% |
+| Age RMSE (lower is better) | **8.32** | 8.53 | Parametric, by 2.5% |
+| q10-q90 interval coverage (raw, uncalibrated) | 0.79 | **0.91** | k-NN, by 12 pts |
+| Mean interval width (lower is tighter) | **16.79** | 26.88 | Parametric, ~38% narrower |
+| Gender-label selective accuracy | **0.970** | 0.966 | Parametric, by 0.4 pts |
+| Abstention rate (lower is more decisive) | 0.192 | **0.179** | k-NN, by 1.3 pts |
+| Latency per image | **1.8 ms** | 2.0 ms | Parametric, ~10% faster |
+
+**Bottom line:** the two methods are close on gender-label accuracy, but
+they trade off in opposite directions on age intervals. The parametric
+model's intervals are far tighter (16.79 vs. 26.88 average width) but
+under-cover their nominal target; the k-NN intervals are wider but land
+closer to the target coverage. Wider intervals reaching higher coverage is
+the expected signature of a more conservative, not more precise, method --
+not evidence that k-NN "wins" outright.
+
+Two caveats on reading this table:
+- **Neither row is calibrated.** The q10-q90 range is, by construction, a
+  nominal 80% interval; 0.79 and 0.91 above are raw empirical coverage
+  *before* conformal calibration is applied to either method, not a
+  guarantee.
+- **Accuracy here is selective accuracy** -- computed only over
+  predictions the gender-label head didn't abstain on (see
+  `docs/evaluation.md` for how this differs from coverage and effective
+  accuracy).
 
 ## Gradient interference and representation similarity
 

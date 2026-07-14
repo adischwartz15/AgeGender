@@ -20,8 +20,8 @@ gender-label prediction.
    choices (residual connections, adapters, loss balancing, pretraining)
 5. **Ethical Awareness**: Confidence-based abstention, identity disclaimers,
    demographic coverage documentation
-6. **Full Stack**: FastAPI backend + React frontend + CLI scripts + Makefile
-   automation
+6. **CLI-Driven Pipeline**: Config-driven CLI scripts + Makefile automation
+   for the full train/calibrate/evaluate/robustness/Grad-CAM workflow
 
 ## Repository Structure
 
@@ -32,15 +32,13 @@ MT-AGNet/
 │   ├── losses/              # Pinball loss, multi-task loss balancing
 │   ├── training/            # Training loop, stages, checkpointing
 │   ├── evaluation/          # Metrics, calibration, Grad-CAM, kNN, selective
-│   ├── inference/           # Predictor, face detection, quality checks
+│   ├── inference/           # Face detection, quality checks
 │   ├── data/                # Dataset, transforms, splits, metadata
-│   ├── api/                 # FastAPI backend
 │   └── utils/               # Config, logging, seeds, visualization
 ├── configs/                 # YAML configuration files
 ├── scripts/                 # CLI entry points (train, evaluate, etc.)
-├── tests/                   # 279 pytest tests
+├── tests/                   # pytest tests
 ├── docs/                    # Technical documentation (15+ files)
-├── frontend/                # React + TypeScript frontend
 ├── notebooks/               # Kaggle/Colab training notebooks
 ├── submission/              # Defense materials (this directory)
 ├── Makefile                 # Automation targets
@@ -64,7 +62,6 @@ MT-AGNet/
 | `docs/code_learning_priority.md` | File reading order for reviewers |
 | `docs/submission_readiness_audit.md` | Full readiness audit |
 | `docs/scientific_validity_audit.md` | Claim-by-claim evidence |
-| `docs/demo_failure_modes.md` | What can go wrong in demos |
 | `docs/fresh_clone_validation.md` | Fresh clone reproduction steps |
 
 ## Submission Materials
@@ -74,7 +71,6 @@ MT-AGNet/
 | `submission/SUBMISSION_README.md` | This file |
 | `submission/DEFENSE_CHEATSHEET.md` | 1-page defense reference |
 | `submission/DEFENSE_QUESTION_BANK.md` | 50+ questions with answers |
-| `submission/DEMO_SCRIPT.md` | Step-by-step demo walkthrough |
 
 ## Verification
 
@@ -82,15 +78,6 @@ MT-AGNet/
 git clone https://github.com/adischwartz15/AgeGender.git
 cd AgeGender
 make install
-make test      # 279 tests pass
+make test      # all tests pass
 make lint      # Clean
 ```
-
-## Test Results
-
-- **Total tests**: 279
-- **Passed**: 279
-- **Failed**: 0
-- **Warnings**: 4 (all benign — Starlette deprecation, PyTorch LR scheduler
-  test-only order)
-- **Test time**: ~65 seconds

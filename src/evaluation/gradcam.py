@@ -4,8 +4,8 @@ Produces separate "model attention visualization" heatmaps for the age
 prediction (using the q50 output as the scalar target) and the dataset
 gender-label prediction (using the selected class logit). Grad-CAM here
 is purely a gradient-weighted activation visualization -- it is not proof
-of causality and does not explain human reasoning; the frontend and all
-generated reports must label it only as "Model attention visualization".
+of causality and does not explain human reasoning; all generated reports
+must label it only as "Model attention visualization".
 """
 
 from __future__ import annotations

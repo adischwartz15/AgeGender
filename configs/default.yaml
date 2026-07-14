@@ -1,7 +1,3 @@
-# Base configuration. Other YAML files under configs/ are merged on top of
-# this file (deep-merge, later keys win). Scripts accept --config to point at
-# an experiment-specific file which typically only overrides a few keys.
-
 project_name: face-multitask-research
 seed: 42
 device: auto            # auto | cpu | cuda

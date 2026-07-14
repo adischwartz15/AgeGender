@@ -1,13 +1,11 @@
-# Dataset configuration. Two adapters are supported:
-#   - "utkface": parses the UTKFace filename convention age_gender_race_date.jpg
-#   - "csv": generic adapter for Kaggle datasets that ship a metadata CSV
+# Dataset configuration.
 #
 # Only "age" and "gender_label" are ever used as supervision targets.
 # Race/ethnicity metadata, if present, is carried purely for documentation
 # and is never used as a feature, target, or split criterion.
 
 dataset:
-  source: utkface              # utkface | csv
+  source: utkface              
   image_root: ./data/raw
   image_size: 128
   channels: 3

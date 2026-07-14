@@ -141,12 +141,10 @@ make download-data
 make prepare-data
 make train
 make calibrate CHECKPOINT=checkpoints/multitask_best_balanced_score.pt
-make demo
+make evaluate CHECKPOINT=checkpoints/multitask_best_balanced_score.pt
 ```
 
-Requirements: Python 3.11+ (3.10+ also works), Node.js 20+/npm for the
-frontend. `make demo` checks readiness (a trained checkpoint + calibration
-artifact) and launches both the API and the frontend together.
+Requirements: Python 3.11+ (3.10+ also works).
 
 ## Main workflow
 
@@ -159,7 +157,6 @@ make build-knn CHECKPOINT=<checkpoint>.pt   # k-NN baseline index
 make evaluate CHECKPOINT=<checkpoint>.pt    # test-set metrics + k-NN comparison
 make robustness CHECKPOINT=<checkpoint>.pt  # corruption robustness sweep
 make gradcam CHECKPOINT=<checkpoint>.pt     # Grad-CAM heatmaps
-make demo                                   # launch API + frontend together
 ```
 
 `prepare-data`, `pretrain`, `train`, and `experiments` accept
@@ -331,31 +328,15 @@ license are **not automatically the same** -- check the weight card for the
 exact `model_id` in use (`configs/transfer_learning.yaml`) before any
 redistribution or commercial use.
 
-## Demo and API
-
-```bash
-make api        # FastAPI backend on :8000
-make frontend   # Vite dev server on :5173
-make demo       # both together, after a readiness check
-```
-
-`POST /predict` returns age (q10/q50/q90, raw and calibrated), gender-label
-probabilities or "Not sure", and optional Grad-CAM/k-NN comparison.
-Uploaded images are processed in memory and not persisted by default; if
-no face is detected, the API declines to predict rather than guessing.
-See [docs/api.md](docs/api.md) for the full endpoint table and example
-requests/responses.
-
 ## Repository structure
 
 ```
-configs/     YAML configuration (data, model, training, experiments, robustness, api)
-src/         Library code (data, models, losses, training, evaluation, inference, api, utils)
+configs/     YAML configuration (data, model, training, experiments, robustness)
+src/         Library code (data, models, losses, training, evaluation, inference, utils)
 scripts/     CLI entry points, one per pipeline stage
 tests/       Pytest suite, including a synthetic-data smoke training test
-frontend/    React + TypeScript + Vite + Tailwind dashboard
 notebooks/   Self-contained Colab and Kaggle notebooks running the full pipeline
-docs/        Architecture, experiments, data/model cards, API, reproducibility
+docs/        Architecture, experiments, data/model cards, reproducibility
 ```
 
 `data/`, `checkpoints/`, `experiments/`, `outputs/`, and `results/` (the
@@ -373,7 +354,6 @@ artifacts and are never committed -- see
 - [Conformal calibration](docs/calibration.md)
 - [Robustness evaluation](docs/robustness.md)
 - [Evaluation metric definitions](docs/evaluation.md)
-- [API usage](docs/api.md)
 - [Supplementary experiments: VOLO-D1 and pretrained ResNet-18/50](docs/transfer_learning.md)
 - [Non-parametric baselines (raw/PCA and frozen-backbone)](docs/nonparametric_baselines.md)
 - [Colab and Kaggle notebooks](docs/notebooks.md)
@@ -393,8 +373,6 @@ artifacts and are never committed -- see
   annotator-assigned, or culturally limited.
 - Race/ethnicity metadata (when present, e.g. in UTKFace) is **never**
   used as a feature, prediction target, or split criterion.
-- Uploaded images are processed in memory and **not persisted to disk**
-  by the API by default.
 - This system has not been validated for, and must not be used for:
   employment, policing, surveillance, identity verification, medical
   diagnosis, admissions, insurance, or any other high-impact decision.

@@ -23,9 +23,9 @@ for the full four-way split protocol). Saves the offset to
 `conformal_calibration.json` under `--calibration-dir` (default:
 `configs/training.yaml: calibration.output_dir`). Reports coverage/width
 before and after calibration on the test set (touched only here, once)
-(`calibration_test_effect.json` alongside it). The API and `Predictor`
-only ever describe an interval as "calibrated" when this artifact exists
-and loaded successfully.
+(`calibration_test_effect.json` alongside it). An interval is only ever
+described as "calibrated" when this artifact exists and loaded
+successfully.
 
 ## Provenance and mismatch protection
 

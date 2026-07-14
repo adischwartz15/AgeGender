@@ -1,7 +1,6 @@
 .PHONY: install test download-data prepare-data pretrain train experiments \
         calibrate build-knn evaluate robustness gradcam architecture-report \
-        run-seeds final-report export-report demo-images demo-readiness demo \
-        compare-backbones api frontend
+        run-seeds final-report export-report compare-backbones
 
 PYTHON ?= python
 CHECKPOINT ?= checkpoints/multitask_best_balanced_score.pt
@@ -11,7 +10,6 @@ ARGS ?=
 
 install:
 	$(PYTHON) -m pip install -r requirements.txt
-	cd frontend && npm install
 
 test:
 	$(PYTHON) -m pytest tests/ -v
@@ -66,18 +64,3 @@ CHECKPOINTS ?= simple_cnn=checkpoints/exp_0_simple_cnn_shared_adapters_learned_b
 RESNET_NAME ?= custom_resnet18
 compare-backbones:
 	$(PYTHON) scripts/compare_backbones.py $(foreach c,$(CHECKPOINTS),--checkpoint $(c)) --resnet-name $(RESNET_NAME)
-
-demo-images:
-	$(PYTHON) scripts/generate_demo_images.py
-
-demo-readiness:
-	$(PYTHON) scripts/check_demo_readiness.py
-
-demo:
-	$(PYTHON) scripts/run_demo.py
-
-api:
-	$(PYTHON) -m uvicorn src.api.main:app --reload --host 0.0.0.0 --port 8000
-
-frontend:
-	cd frontend && npm run dev
