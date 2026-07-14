@@ -13,9 +13,27 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import numpy
 import torch
 
 logger = logging.getLogger(__name__)
+
+# Checkpoints saved by this repository's trainers embed a NumPy RNG state
+# (see PersistentArtifactManager / TransferTrainer, saved for reproducible
+# resume) alongside the tensor state dicts. PyTorch >=2.6 defaults
+# torch.load to weights_only=True, whose unpickler rejects any global not
+# explicitly allow-listed -- these four are exactly the NumPy array/dtype
+# reconstruction primitives needed to unpickle that RNG state (verified
+# against a real checkpoint: each was added one at a time, following the
+# unpickler's own "Unsupported global" errors, until loading succeeded).
+# None of them execute arbitrary code; this keeps weights_only=True's
+# protection against pickle payloads for everything else.
+_SAFE_CHECKPOINT_GLOBALS = [
+    numpy._core.multiarray._reconstruct,
+    numpy.ndarray,
+    numpy.dtype,
+    numpy.dtypes.UInt32DType,
+]
 
 
 def save_checkpoint(
@@ -46,7 +64,8 @@ def load_checkpoint(path: str | Path, map_location: str = "cpu") -> dict[str, An
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {path}")
-    return torch.load(path, map_location=map_location)
+    with torch.serialization.safe_globals(_SAFE_CHECKPOINT_GLOBALS):
+        return torch.load(path, map_location=map_location, weights_only=True)
 
 
 class BestMetricTracker:
