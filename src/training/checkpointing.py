@@ -19,8 +19,8 @@ import torch
 logger = logging.getLogger(__name__)
 
 # Checkpoints saved by this repository's trainers embed a NumPy RNG state
-# (see PersistentArtifactManager / TransferTrainer, saved for reproducible
-# resume) alongside the tensor state dicts. PyTorch >=2.6 defaults
+# (see PersistentArtifactManager, saved for reproducible resume) alongside
+# the tensor state dicts. PyTorch >=2.6 defaults
 # torch.load to weights_only=True, whose unpickler rejects any global not
 # explicitly allow-listed -- these four are exactly the NumPy array/dtype
 # reconstruction primitives needed to unpickle that RNG state (verified

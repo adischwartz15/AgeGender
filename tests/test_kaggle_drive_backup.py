@@ -18,8 +18,7 @@ from src.utils import kaggle_drive_backup as backup
 
 
 def test_module_never_imports_platform_packages_at_module_scope():
-    """Static guard (mirrors tests/test_pretrained_volo.py's AST-scan
-    approach for timm): kaggle_secrets/google.oauth2/googleapiclient must
+    """Static guard: kaggle_secrets/google.oauth2/googleapiclient must
     only ever be imported inside a function body, never at module scope --
     this is what makes it safe to import this module from Colab, local, or
     a Kaggle run with Drive backup disabled."""

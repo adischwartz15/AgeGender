@@ -127,10 +127,9 @@ def test_parameter_breakdown_no_adapters():
 
 
 def test_module_never_imports_torchvision_at_module_scope():
-    """Mirrors tests/test_pretrained_volo.py's AST-scan pattern: torchvision
-    must only ever be imported inside a function body, never at module
-    scope -- this is what keeps every core experiment importable with
-    torchvision completely absent."""
+    """torchvision must only ever be imported inside a function body, never
+    at module scope -- this is what keeps every core experiment importable
+    with torchvision completely absent."""
     source = Path(__file__).resolve().parents[1].joinpath("src", "models", "pretrained_resnet.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     for node in tree.body:

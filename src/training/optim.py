@@ -1,5 +1,5 @@
 """Optimizer parameter-grouping and scheduler helpers shared by the core
-``Trainer`` and the VOLO ``TransferTrainer``.
+``Trainer``.
 
 The single source of truth for two training-recipe decisions the mission's
 final-run hardening requires to be correct and consistent across both
@@ -20,8 +20,7 @@ trainers:
    parameter), so a refactor that accidentally drops or double-counts a
    parameter fails loudly instead of silently training a subset.
 
-Neither function imports ``timm`` or any optional dependency, so both
-trainers can share them with the core install alone.
+Neither function imports any optional dependency.
 """
 
 from __future__ import annotations

@@ -125,6 +125,52 @@ experiments:
         loss_balancing:
           mode: learned_uncertainty
 
+  exp_d_gender_loss_rescaled:
+    description: >
+      Diagnostic follow-up to Experiment D: same shared backbone + adapters
+      + learned homoscedastic-uncertainty loss balancing, except the gender
+      cross-entropy loss is rescaled (gender_loss_scale=8.5) before entering
+      the learned-weighting term only -- never in reported metrics. In the
+      original Experiment D run, the learned weights converged to
+      effective_gender_weight~=5.78 vs. effective_age_weight~=0.57 (~10x),
+      traced back to age_loss (~1.79, "years" scale) and gender_loss (~0.21,
+      "nats" scale) living on very different numeric scales rather than a
+      real task-difficulty difference. 8.5 is chosen so
+      age_loss/(gender_loss*8.5) ~= 1 at that same convergence point. Tests
+      whether correcting the scale mismatch alone lets learned balancing
+      beat fixed weights (Experiment C), which it did not before this fix.
+    overrides:
+      model:
+        architecture: shared_adapters
+        adapters:
+          enabled: true
+        loss_balancing:
+          mode: learned_uncertainty
+          learned_uncertainty:
+            gender_loss_scale: 8.5
+
+  exp_d_log_var_clamped:
+    description: >
+      Diagnostic follow-up to Experiment D: same shared backbone + adapters
+      + learned homoscedastic-uncertainty loss balancing, except
+      log_var_age/log_var_gender are clamped to [-1.0, 1.0] before computing
+      the precision weights -- caps the maximum learned weight ratio between
+      tasks to ~e^2 (~7.4x), instead of the ~10x ratio observed uncontrolled
+      in the original Experiment D run. Tests whether bounding the imbalance
+      alone (without correcting its root cause, unlike
+      exp_d_gender_loss_rescaled) is enough to let learned balancing beat
+      fixed weights (Experiment C).
+    overrides:
+      model:
+        architecture: shared_adapters
+        adapters:
+          enabled: true
+        loss_balancing:
+          mode: learned_uncertainty
+          learned_uncertainty:
+            log_var_clamp_min: -1.0
+            log_var_clamp_max: 1.0
+
   exp_e_parametric_vs_knn:
     description: >
       Compares the best parametric multi-task model (from exp_d, or exp_c if

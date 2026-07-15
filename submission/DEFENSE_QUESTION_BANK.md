@@ -15,8 +15,8 @@ answers, deeper technical answers, follow-ups, and key files.
 - **Warning**: Don't say "we predict gender identity" — say "dataset gender labels."
 
 ### Q2: Why is this a research project and not a production system?
-- **Oral**: "It's trained on one dataset with known demographic biases, uses a classical face detector, and hasn't been validated for any real-world application."
-- **Deeper**: UTKFace has limited demographic coverage (binary labels, skewed age distribution, primarily frontal faces). The Haar cascade misses non-frontal faces. No fairness auditing, no adversarial robustness, no consent framework.
+- **Oral**: "It's trained on one dataset with known demographic biases and hasn't been validated for any real-world application."
+- **Deeper**: UTKFace has limited demographic coverage (binary labels, skewed age distribution, primarily frontal faces). No fairness auditing, no adversarial robustness, no consent framework.
 - **Follow-up**: What would you need to add for production?
 - **Key file**: `docs/model_card.md`
 
@@ -256,14 +256,6 @@ answers, deeper technical answers, follow-ups, and key files.
 
 ---
 
-## 24-25. Face Detection
-
-### Q33: What happens when no face is detected?
-- **Oral**: "Prediction is declined rather than guessed — age and gender come back as null/None with a warning. The system doesn't guess on non-face images."
-- **Key file**: `src/inference/face_detection.py`
-
----
-
 ## 26. Reproducibility
 
 ### Q34: Why don't reproducible seeds guarantee identical GPU runs?
@@ -342,6 +334,6 @@ Simplicity; 0.80 is interpretable and avoids overfitting the threshold to valida
 ### Q50: How is the calibration artifact validated?
 SHA-256 of the checkpoint and split file are recorded; mismatch raises `CalibrationMismatchError`.
 
-### Q51-Q80: [Additional questions on training stages, early stopping patience, batch size selection, data augmentation choices, Kaiming initialization, zero-init residual branches, weight decay, gradient clipping value, cosine annealing T_max, per-bucket age analysis, confusion matrix interpretation, AURC computation, bootstrap CI methodology, face margin ratio selection, multi-pass cascade strategy, etc.]
+### Q51-Q80: [Additional questions on training stages, early stopping patience, batch size selection, data augmentation choices, Kaiming initialization, zero-init residual branches, weight decay, gradient clipping value, cosine annealing T_max, per-bucket age analysis, confusion matrix interpretation, AURC computation, bootstrap CI methodology, etc.]
 
 Each follows the same format: oral answer, deeper answer, follow-up, key file, warning.

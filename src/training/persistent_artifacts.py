@@ -1,6 +1,5 @@
 """Reusable, platform-agnostic persistence layer for long-running, resumable
-training runs (built for the VOLO transfer-learning extension, but nothing
-here is VOLO-specific).
+training runs.
 
 Why this exists: a Colab/Kaggle runtime can disconnect at any point during a
 multi-hour, multi-seed run. Without a persistence layer, checkpoints and
@@ -9,18 +8,16 @@ full retrain. This module centralizes atomic checkpoint writes, checksums,
 seed-completion tracking, and local<->persistent-storage synchronization
 behind one class, so that:
 
-- The trainer (``src/training/transfer_trainer.py``) only ever calls a
-  handful of ``on_*`` hook methods -- it has no idea whether "persistent"
-  means a mounted Google Drive folder, ``/kaggle/working``, or a plain local
-  directory (a unit test uses two temp directories).
+- A trainer only ever calls a handful of ``on_*`` hook methods -- it has no
+  idea whether "persistent" means a mounted Google Drive folder,
+  ``/kaggle/working``, or a plain local directory (a unit test uses two temp
+  directories).
 - No ``shutil.copytree``/Drive-mount/Kaggle-specific code is scattered
-  through model or trainer code -- see ``docs/transfer_learning.md``
-  "Persistent artifacts" for the full directory layout this class manages.
+  through model or trainer code.
 
 Torch is a hard dependency of this module (checkpoints are ``torch.save``
 payloads) -- that's fine, since torch is a base requirement of the whole
-repository, unlike ``timm`` (see ``src/models/pretrained_volo.py``'s
-docstring for that distinction).
+repository.
 """
 
 from __future__ import annotations
@@ -398,8 +395,7 @@ class PersistentArtifactManager:
         expected_pretrained_source: str | None = None,
     ) -> bool:
         """A seed is complete only if every one of these independently holds
-        (never inferred from directory existence alone, per
-        ``docs/transfer_learning.md`` "Persistent artifacts"):
+        (never inferred from directory existence alone):
 
         1. ``completion.json`` exists and ``status == "complete"``.
         2. The best checkpoint it references exists on disk.
@@ -502,7 +498,7 @@ class PersistentArtifactManager:
         logger.info("seed=%d: restored %d file(s) from %s", self.seed, len(restored), self.persistent_seed_dir)
         return restored
 
-    # -- hooks (called by TransferTrainer / CLI) -------------------------------------
+    # -- hooks (called by a resumable trainer / CLI) -------------------------------------
 
     def on_epoch_end(self, checkpoint_payload: dict, history: dict, trainer_state: dict, is_best: bool) -> None:
         self.save_last_checkpoint(checkpoint_payload)
@@ -568,9 +564,7 @@ def scan_artifact_root(root: str | Path) -> list[dict]:
     (``<root>/<experiment_name>/seed_<seed>/...``) and return one summary
     row per experiment/seed directory found -- read-only, never mutates
     anything under ``root``. Powers a notebook's live status-table display
-    (see ``docs/transfer_learning.md`` "Persistent artifacts" for the
-    directory layout this reads) without duplicating that layout knowledge
-    in notebook code.
+    without duplicating that layout knowledge in notebook code.
 
     Each row: ``experiment``, ``seed``, ``status`` (``COMPLETE`` /
     ``INCOMPLETE`` / ``NOT STARTED`` / ``CORRUPTED``), ``stage``, ``epoch``,

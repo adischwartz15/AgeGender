@@ -55,7 +55,6 @@ MT-AGNet/
 | `docs/experiment_plan.md` | Pre-registered ablation protocol |
 | `docs/results.md` | Committed results from one real run |
 | `docs/evaluation.md` | Metric definitions |
-| `docs/model_card.md` | Model capabilities and limitations |
 | `docs/data_card.md` | Dataset documentation |
 | `docs/calibration.md` | Conformal calibration methodology |
 | `docs/code_walkthrough.md` | End-to-end flow traces |

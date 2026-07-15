@@ -71,9 +71,9 @@ def main() -> int:
         return 1
     base_overrides = experiments_cfg[args.experiment].get("overrides", {})
 
-    # This script has no resume/skip-completed logic of its own (unlike
-    # scripts/run_transfer_learning.py's PersistentArtifactManager-backed
-    # seeds) -- every requested seed is always (re)trained from scratch.
+    # This script has no resume/skip-completed logic of its own (unlike a
+    # PersistentArtifactManager-backed resumable run) -- every requested
+    # seed is always (re)trained from scratch.
     # "already has a checkpoint" here is informational only, not a "will be
     # reused" signal, so it is never reported as "completed (reused)".
     already_has_checkpoint = [

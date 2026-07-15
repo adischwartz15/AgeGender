@@ -1,13 +1,9 @@
 """Non-biometric image-quality diagnostics.
 
 Computes resolution, brightness, contrast, and blur statistics and turns
-them into human-readable warnings. This module does not perform face
-detection itself -- "image may be too dark", "may be blurry", etc.
-describe the raw uploaded image only, independent of whether a face was
-found in it. Classical (Haar cascade) face detection, used only to crop
-the model's input, lives separately in ``src/inference/face_detection.py``;
-see ``PredictionResult.face_detected`` for whether it found a face in a
-given request.
+them into human-readable warnings -- "image may be too dark", "may be
+blurry", etc. -- describing the raw image itself, independent of any
+model prediction.
 """
 
 from __future__ import annotations

@@ -1,43 +1,17 @@
-"""Supplementary experiment: ImageNet-pretrained torchvision ResNet-18/50
-(face-only) multi-task model -- the pretrained-ResNet bridge baseline.
+"""An ImageNet-pretrained torchvision ResNet-18/50 backbone, wrapped with
+this project's own adapters (``src/models/adapters.py``), heads
+(``src/models/heads.py``), and loss balancing
+(``src/losses/multitask_loss.py``).
 
-Scientific role (see docs/transfer_learning.md and the mission's final-run
-hardening notes): neither this class nor its config claims to isolate
-"the effect of pretraining" in a controlled sense. **Pretrained ResNet-18**
-is the highest-priority entry here -- the most interpretable bridge between
-this project's from-scratch Custom ResNet-18
-(``src/models/custom_resnet.py``) and a fully pretrained modern backbone
-(VOLO-D1, ``src/models/pretrained_volo.py``), since it shares the same
-*architecture family* (ResNet) and roughly comparable depth, differing
-primarily in initialization (random vs. ImageNet), the exact residual-block
-implementation (torchvision's vs. this project's own), and input resolution
-(128px vs. 224px). **torchvision ResNet-18 is not byte-identical to this
-project's Custom ResNet-18** -- torchvision's stem, BasicBlock ordering,
-and normalization-layer defaults are its own implementation, not a port of
-``src/models/custom_resnet.py``. Any difference in Table B between the two
-therefore still reflects initialization **and** implementation differences
-combined, just fewer confounds than the VOLO-D1 comparison (which also
-differs in architecture family, parameter count, and capacity).
-**Pretrained ResNet-50** (optional) additionally changes architecture
-depth/width/capacity relative to ResNet-18 -- it is a combined
-"pretraining + architecture + capacity" comparison, never described as
-isolating pretraining alone.
+Today it's mainly used as a frozen feature extractor for the
+non-parametric ``frozen_backbone`` baseline (adapters off -- see
+``src/evaluation/nonparametric/features.py``), which only calls
+``encode()``/``forward()``. The freeze/unfreeze/parameter-group methods
+below are for fine-tuning and aren't used by that path.
 
-Reuses, unmodified, the project's existing task-specific adapters
-(``src/models/adapters.py``), task heads (``src/models/heads.py``), learned
-homoscedastic-uncertainty loss balancing (``src/losses/multitask_loss.py``),
-and 2-stage transfer-training protocol (``src/training/transfer_trainer.py``)
--- this class exposes the exact same duck-typed interface
-(``build_transforms``, ``encode``/``forward``, ``freeze_backbone``/
-``unfreeze_backbone``/``unfreeze_last_stages``, ``get_parameter_groups``,
-``parameter_breakdown``, ``model_id``/``pretrained_source``) that
-``PretrainedVOLOFaceOnlyMultiTask`` does, so ``TransferTrainer`` and
-``scripts/run_transfer_learning.py`` work with it unmodified.
-
-``torchvision`` is an optional dependency (see ``requirements-transfer.txt``)
--- this module is the only place in the repository that imports it, and
-does so lazily inside functions, so every core (from-scratch) experiment
-imports and runs with ``torchvision`` completely absent.
+``torchvision`` is optional (see ``requirements-transfer.txt``) and is
+only imported inside functions here, so core experiments still work
+without it installed.
 """
 
 from __future__ import annotations
@@ -59,8 +33,7 @@ _SUPPORTED_MODELS = {
 }
 
 # Canonical pretrained-source tags this project will ever accept for this
-# extension -- ImageNet only, mirroring src/models/pretrained_volo.py's
-# same allow-list rationale (never a source that could leak the test set).
+# extension -- ImageNet only (never a source that could leak the test set).
 ALLOWED_PRETRAINED_SOURCES = frozenset({"imagenet1k_v1", "imagenet1k_v2"})
 
 
@@ -108,7 +81,7 @@ def _require_torchvision():
 
 @dataclass
 class PretrainedResNetParameterBreakdown:
-    """Parameter counts by component, mirroring VOLOParameterBreakdown's shape."""
+    """Parameter counts by component."""
 
     backbone_name: str
     backbone: int
@@ -137,9 +110,8 @@ class PretrainedResNetParameterBreakdown:
 class PretrainedResNetFaceOnlyMultiTask(nn.Module):
     """ImageNet-pretrained torchvision ResNet-18/50 backbone + the project's
     existing adapters/heads/loss balancing -- the pretrained-ResNet bridge
-    baseline. See this module's docstring for its scientific role and
-    limitations relative to both the from-scratch Custom ResNet-18 and the
-    VOLO-D1 supplementary experiment.
+    baseline. See this module's docstring for its role and limitations
+    relative to the from-scratch Custom ResNet-18.
     """
 
     def __init__(self, config: dict) -> None:
@@ -186,8 +158,7 @@ class PretrainedResNetFaceOnlyMultiTask(nn.Module):
 
         self.embedding_dim = self._discover_and_verify_embedding_dim()
         # Replace the ImageNet classifier head with identity -- forward(x)
-        # then returns the pooled feature vector directly (same convention
-        # PretrainedVOLOFaceOnlyMultiTask uses via timm's num_classes=0).
+        # then returns the pooled feature vector directly.
         self.backbone.fc = nn.Identity()
 
         adapters_cfg = model_cfg.get("adapters", {})
@@ -232,13 +203,13 @@ class PretrainedResNetFaceOnlyMultiTask(nn.Module):
             self.log_var_age = None
             self.log_var_gender = None
 
-        # Starts fully trainable; Stage 1 of TransferTrainer calls
+        # Starts fully trainable; a caller doing staged fine-tuning calls
         # freeze_backbone() explicitly before training begins.
 
     def _discover_and_verify_embedding_dim(self) -> int:
-        """Dry-run forward pass, mirroring PretrainedVOLOFaceOnlyMultiTask's
-        own verification: cross-checks torchvision's declared ``fc.in_features``
-        against the actual pooled output shape before wiring up adapters/heads."""
+        """Dry-run forward pass that cross-checks torchvision's declared
+        ``fc.in_features`` against the actual pooled output shape before
+        wiring up adapters/heads."""
         declared_dim = getattr(self.backbone.fc, "in_features", None)
         if declared_dim is None:
             raise ValueError(f"torchvision model '{self.model_id}' has no fc.in_features to read.")
@@ -276,7 +247,7 @@ class PretrainedResNetFaceOnlyMultiTask(nn.Module):
         self.backbone.train()
         return int(declared_dim)
 
-    # -- encode/forward: same output-dict contract as MultiTaskFaceModel / PretrainedVOLOFaceOnlyMultiTask ------
+    # -- encode/forward: same output-dict contract as MultiTaskFaceModel ------
 
     def encode(self, images: torch.Tensor) -> dict[str, torch.Tensor]:
         z_shared = self.backbone(images)
@@ -294,7 +265,7 @@ class PretrainedResNetFaceOnlyMultiTask(nn.Module):
         gender_logits = self.gender_head(embeddings["gender_embedding"])
         return {**embeddings, "age_output": age_output, "gender_logits": gender_logits}
 
-    # -- freeze/unfreeze + parameter groups (same contract as PretrainedVOLOFaceOnlyMultiTask) -----------------
+    # -- freeze/unfreeze + parameter groups -----------------
 
     def freeze_backbone(self) -> None:
         for param in self.backbone.parameters():
@@ -307,9 +278,8 @@ class PretrainedResNetFaceOnlyMultiTask(nn.Module):
     def unfreeze_last_stages(self, n: int) -> None:
         """Unfreeze only the last ``n`` of torchvision ResNet's
         ``[layer1, layer2, layer3, layer4]`` stages (plus nothing further
-        downstream needs unfreezing -- unlike VOLO's separate final norm
-        layer, torchvision's ResNet has no post-layer4 normalization before
-        the now-identity ``fc``)."""
+        downstream needs unfreezing -- torchvision's ResNet has no
+        post-layer4 normalization before the now-identity ``fc``)."""
         if n < 1:
             raise InvalidStageTransitionError(f"unfreeze_last_stages(n={n}) requires n >= 1.")
         stages = [self.backbone.layer1, self.backbone.layer2, self.backbone.layer3, self.backbone.layer4]
@@ -325,8 +295,7 @@ class PretrainedResNetFaceOnlyMultiTask(nn.Module):
     def get_parameter_groups(
         self, backbone_lr: float, adapter_lr: float, head_lr: float, balance_lr: float, weight_decay: float,
     ) -> list[dict]:
-        """Same contract as PretrainedVOLOFaceOnlyMultiTask.get_parameter_groups:
-        per-component learning rates, with zero weight decay on biases/
+        """Per-component learning rates, with zero weight decay on biases/
         normalization/scalar loss-balancing parameters (see
         src/training/optim.py::build_param_groups)."""
         from src.training.optim import build_param_groups
@@ -408,5 +377,5 @@ class PretrainedResNetFaceOnlyMultiTask(nn.Module):
 
 
 def build_pretrained_resnet_model(config: dict) -> PretrainedResNetFaceOnlyMultiTask:
-    """Factory mirroring pretrained_volo.py's build_pretrained_volo_model call shape."""
+    """Factory for :class:`PretrainedResNetFaceOnlyMultiTask`."""
     return PretrainedResNetFaceOnlyMultiTask(config)

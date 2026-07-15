@@ -51,8 +51,8 @@ def resize_and_center_crop(
     the shorter side to ``round(size / crop_pct)``, then center-crop to
     ``size``. With ``crop_pct == 1.0`` this reduces to resizing the shorter
     side directly to ``size``, identical to the pre-existing behaviour. A
-    pretrained model's resolved ``crop_pct < 1.0`` (e.g. many timm/
-    torchvision configs) means the intermediate resize is *larger* than the
+    pretrained model's resolved ``crop_pct < 1.0`` (e.g. many torchvision
+    configs) means the intermediate resize is *larger* than the
     final crop, matching what that backbone was actually trained/validated
     with -- using ``crop_pct=1.0`` unconditionally for such a model would
     silently feed it out-of-distribution preprocessing.
@@ -122,9 +122,10 @@ class EvalTransform:
     ``mean``/``std``/``interpolation`` default to this project's original
     values (``IMAGENET_MEAN``/``IMAGENET_STD``/bilinear), so every existing
     caller that only passes ``image_size`` is unaffected. A pretrained
-    backbone experiment (e.g. VOLO via timm) can instead pass the exact
-    size/mean/std/interpolation resolved from that backbone's own
-    pretrained-model config, rather than this project's defaults.
+    backbone experiment (e.g. pretrained-ResNet via torchvision) can
+    instead pass the exact size/mean/std/interpolation resolved from that
+    backbone's own pretrained-model config, rather than this project's
+    defaults.
     """
 
     def __init__(
@@ -184,10 +185,9 @@ def resolve_eval_transform(model, config: dict | None = None) -> EvalTransform:
     extraction/inference/prediction-export code path resolves its
     deterministic preprocessing from.
 
-    If ``model`` declares its own ``build_transforms()`` (currently
-    ``PretrainedVOLOFaceOnlyMultiTask`` and the pretrained-torchvision
-    wrappers -- see ``src/models/pretrained_resnet.py``), returns exactly
-    that model's own resolved eval transform (its own input size, mean,
+    If ``model`` declares its own ``build_transforms()`` (currently the
+    pretrained-torchvision wrapper -- see ``src/models/pretrained_resnet.py``),
+    returns exactly that model's own resolved eval transform (its own input size, mean,
     std, interpolation, and crop_pct) -- **never** this project's 128px/
     IMAGENET-constant default for such a model. Every core (from-scratch)
     model has no such method, so this falls back to
@@ -197,7 +197,7 @@ def resolve_eval_transform(model, config: dict | None = None) -> EvalTransform:
     Centralizing this (rather than each script re-implementing
     ``hasattr(model, "build_transforms")``) is what makes it structurally
     impossible for calibration/robustness/k-NN/prediction-export to
-    accidentally evaluate a VOLO or pretrained-ResNet checkpoint with the
+    accidentally evaluate a pretrained-ResNet checkpoint with the
     wrong preprocessing -- previously several of these scripts hardcoded
     ``EvalTransform(config["dataset"]["image_size"])`` unconditionally,
     which is silently wrong (wrong resolution *and* wrong normalization

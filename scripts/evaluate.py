@@ -178,7 +178,7 @@ def evaluate_checkpoint(
         return None
     df = pd.read_csv(splits_path)
     test_df = df[df["split"] == "test"]
-    # A model that declares its own preprocessing (VOLO / pretrained-ResNet,
+    # A model that declares its own preprocessing (pretrained-ResNet,
     # resolved from its pretrained backbone's own config) is evaluated with
     # that transform instead of this project's 128px/IMAGENET-constant
     # default -- every core model has no such method, so this is a no-op

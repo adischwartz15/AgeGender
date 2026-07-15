@@ -30,7 +30,7 @@ def _tiny_payload(epoch=1, stage="Stage 1: frozen backbone"):
         "optimizer_state_dict": {"state": {}, "param_groups": []},
         "epoch": epoch,
         "training_stage": stage,
-        "config": {"model": {"family": "pretrained_volo"}},
+        "config": {"model": {"family": "pretrained_resnet"}},
     }
 
 
@@ -121,10 +121,10 @@ def test_mark_seed_complete_and_is_seed_complete(tmp_path):
         "seed": 42, "status": "complete", "best_checkpoint": str(checkpoint_path),
         "test_metrics": {"age_mae": 5.0}, "completed_at": "2026-01-01T00:00:00Z",
         "split_sha256": "abc123", "checkpoint_sha256": sha256_file(checkpoint_path),
-        "model_id": "volo_d1_224", "pretrained_source": "imagenet1k",
+        "model_id": "resnet18_224", "pretrained_source": "imagenet1k_v1",
     })
 
-    assert manager.is_seed_complete(expected_split_sha256="abc123", expected_model_id="volo_d1_224")
+    assert manager.is_seed_complete(expected_split_sha256="abc123", expected_model_id="resnet18_224")
     assert not manager.is_seed_complete(expected_split_sha256="different-hash")
     assert not manager.is_seed_complete(expected_model_id="some_other_model")
 

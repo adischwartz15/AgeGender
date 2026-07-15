@@ -1,12 +1,10 @@
-"""Notebook-level checks for the T8 execution-flag cells added to both
-notebooks: the pretrained-ResNet-18/50 bridge baseline and the
-non-parametric (raw/PCA + frozen-backbone) baselines.
+"""Notebook-level checks for the optional Non-Parametric Baselines
+section present in both notebooks.
 
-Mirrors tests/test_transfer_learning_notebook.py's approach -- statically
-parses and validates the real, shipped .ipynb files rather than
-reimplementing their logic (which could drift from what actually ships).
-Parametrized over both notebooks since the two extensions were added to
-both, with only the Colab-specific Drive-sync calls differing.
+Statically parses and validates the real, shipped .ipynb files rather
+than reimplementing their logic (which could drift from what actually
+ships). Parametrized over both notebooks since the section exists in
+both.
 """
 
 from __future__ import annotations
@@ -45,79 +43,39 @@ def _code_cell_containing(nb: dict, needle: str) -> str:
     )
 
 
+# Anchor unique to the Non-Parametric Baselines *code* cell -- unlike
+# "RUN_NONPARAMETRIC_BASELINES" (which also appears in the earlier USER
+# CONFIGURATION cell that sets its default), this string only appears in
+# the cell that actually runs the baselines.
+_NONPARAM_CODE_ANCHOR = "tune_nonparametric_baselines.py"
+
+
 @pytest.mark.parametrize("path", NOTEBOOK_PATHS, ids=lambda p: p.name)
 class TestNonParametricBaselinesCell:
-    def test_section_exists_unnumbered_and_before_archive(self, path):
+    def test_section_exists_and_before_archive(self, path):
         nb = _load(path)
         headers = _markdown_headers(nb)
-        matches = [(i, h) for i, h in headers if h.startswith("### Non-Parametric Baselines")]
+        matches = [(i, h) for i, h in headers if h.startswith("## 21. Non-Parametric Baselines")]
         assert len(matches) == 1
         section_idx = matches[0][0]
-        archive_idx = next(i for i, h in headers if h.startswith("## 18."))
-        supplementary_idx = next(i for i, h in headers if h.startswith("## Supplementary Experiment"))
-        assert supplementary_idx < section_idx < archive_idx
+        archive_idx = next(i for i, h in headers if h.startswith("## 22."))
+        summary_idx = next(i for i, h in headers if h.startswith("## 20."))
+        assert summary_idx < section_idx < archive_idx
 
-    def test_toggle_defaults_off(self, path):
+    def test_toggle_defaults_on(self, path):
         nb = _load(path)
-        code = _code_cell_containing(nb, "RUN_NONPARAMETRIC_BASELINES")
-        assert "RUN_NONPARAMETRIC_BASELINES = False" in code
+        config_code = _code_cell_containing(nb, "USER CONFIGURATION")
+        assert "RUN_NONPARAMETRIC_BASELINES = True" in config_code
 
     def test_reuses_repository_scripts_not_duplicated_logic(self, path):
         nb = _load(path)
-        code = _code_cell_containing(nb, "RUN_NONPARAMETRIC_BASELINES")
+        code = _code_cell_containing(nb, _NONPARAM_CODE_ANCHOR)
         assert "tune_nonparametric_baselines.py" in code
         assert "evaluate_nonparametric_baselines.py" in code
 
     def test_code_is_syntactically_valid(self, path):
         nb = _load(path)
-        code = _code_cell_containing(nb, "RUN_NONPARAMETRIC_BASELINES")
-        ast.parse(code)
-
-
-@pytest.mark.parametrize("path", NOTEBOOK_PATHS, ids=lambda p: p.name)
-class TestPretrainedResNetCell:
-    def test_section_exists_unnumbered_and_before_archive(self, path):
-        nb = _load(path)
-        headers = _markdown_headers(nb)
-        matches = [(i, h) for i, h in headers if h.startswith("### Pretrained ResNet")]
-        assert len(matches) == 1
-        section_idx = matches[0][0]
-        archive_idx = next(i for i, h in headers if h.startswith("## 18."))
-        supplementary_idx = next(i for i, h in headers if h.startswith("## Supplementary Experiment"))
-        assert supplementary_idx < section_idx < archive_idx
-
-    def test_toggle_defaults_off(self, path):
-        nb = _load(path)
-        code = _code_cell_containing(nb, "RUN_PRETRAINED_RESNET_EXTENSION")
-        assert "RUN_PRETRAINED_RESNET_EXTENSION = False" in code
-
-    def test_default_family_is_resnet18_required_not_resnet50_optional(self, path):
-        nb = _load(path)
-        code = _code_cell_containing(nb, "RUN_PRETRAINED_RESNET_EXTENSION")
-        assert 'PRETRAINED_RESNET_FAMILY = "pretrained_resnet18"' in code
-        assert "pretrained_resnet50" in code  # mentioned as the optional alternative
-
-    def test_reuses_run_transfer_learning_script_via_model_family_flag(self, path):
-        nb = _load(path)
-        code = _code_cell_containing(nb, "RUN_PRETRAINED_RESNET_EXTENSION")
-        assert "run_transfer_learning.py" in code
-        assert "--model-family" in code
-
-    def test_reuses_canonical_seeds_not_hardcoded(self, path):
-        nb = _load(path)
-        code = _code_cell_containing(nb, "RUN_PRETRAINED_RESNET_EXTENSION")
-        assert "TRANSFER_SEEDS" in code
-        assert "42,43,44" not in code
-
-    def test_reuses_resume_and_skip_completed_flags(self, path):
-        nb = _load(path)
-        code = _code_cell_containing(nb, "RUN_PRETRAINED_RESNET_EXTENSION")
-        for flag in ("--resume", "--skip-completed", "--persistent-root", "--storage-root"):
-            assert flag in code, f"missing {flag!r}"
-
-    def test_code_is_syntactically_valid(self, path):
-        nb = _load(path)
-        code = _code_cell_containing(nb, "RUN_PRETRAINED_RESNET_EXTENSION")
+        code = _code_cell_containing(nb, _NONPARAM_CODE_ANCHOR)
         ast.parse(code)
 
 
@@ -125,52 +83,17 @@ def test_colab_new_cells_sync_to_drive_after_each_extension():
     """Only Colab has sync_after_phase (Drive persistence) -- Kaggle
     persists automatically via /kaggle/working, see test below."""
     nb = _load(COLAB_PATH)
-    nonparam_code = _code_cell_containing(nb, "RUN_NONPARAMETRIC_BASELINES")
-    resnet_code = _code_cell_containing(nb, "RUN_PRETRAINED_RESNET_EXTENSION")
+    nonparam_code = _code_cell_containing(nb, _NONPARAM_CODE_ANCHOR)
     assert "sync_after_phase(" in nonparam_code
-    assert "sync_after_phase(" in resnet_code
-    assert "--sync-after-epoch" in resnet_code
 
 
 def test_kaggle_new_cells_do_not_reference_colab_only_drive_sync():
-    """sync_after_phase and --sync-after-epoch are Colab-only symbols (the
-    former is defined in a Colab-only cell that checks IN_COLAB; the latter
-    is never used by any other Kaggle cell either) -- referencing them in
-    the Kaggle notebook would raise NameError / pass a meaningless flag."""
+    """sync_after_phase is a Colab-only symbol (defined in a Colab-only
+    cell that checks IN_COLAB) -- referencing it in the Kaggle notebook
+    would raise NameError."""
     nb = _load(KAGGLE_PATH)
-    nonparam_code = _code_cell_containing(nb, "RUN_NONPARAMETRIC_BASELINES")
-    resnet_code = _code_cell_containing(nb, "RUN_PRETRAINED_RESNET_EXTENSION")
+    nonparam_code = _code_cell_containing(nb, _NONPARAM_CODE_ANCHOR)
     assert "sync_after_phase(" not in nonparam_code
-    assert "sync_after_phase(" not in resnet_code
-    assert "--sync-after-epoch" not in resnet_code
-
-
-@pytest.mark.parametrize("path", NOTEBOOK_PATHS, ids=lambda p: p.name)
-def test_all_referenced_bootstrap_variables_are_actually_defined(path):
-    """The new cells reuse REPO_DIR/RUN_DIR/TRANSFER_SEEDS/LOCAL_TRANSFER_ROOT/
-    PERSISTENT_TRANSFER_ROOT/AUTO_RESUME/SKIP_COMPLETED from the existing
-    Persistent Transfer-Learning Storage bootstrap cell rather than
-    redefining them -- guard against silent drift if that cell is ever
-    renamed."""
-    nb = _load(path)
-    full_source = "\n".join("".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code")
-    for var in (
-        "REPO_DIR", "RUN_DIR", "TRANSFER_SEEDS", "LOCAL_TRANSFER_ROOT",
-        "PERSISTENT_TRANSFER_ROOT", "AUTO_RESUME", "SKIP_COMPLETED",
-    ):
-        assert f"{var} =" in full_source or f"{var}=" in full_source, f"{var} never defined in notebook"
-
-
-@pytest.mark.parametrize("path", NOTEBOOK_PATHS, ids=lambda p: p.name)
-def test_live_status_table_cell_exists_and_reuses_scan_artifact_root(path):
-    """The reusable live status-table cell must call the real
-    scan_artifact_root() (src/training/persistent_artifacts.py), never
-    reimplement the directory-scanning logic inline in the notebook."""
-    nb = _load(path)
-    code = _code_cell_containing(nb, "show_artifact_status_table")
-    assert "from src.training.persistent_artifacts import scan_artifact_root" in code
-    assert "scan_artifact_root(root)" in code
-    ast.parse(code)
 
 
 @pytest.mark.parametrize("path", NOTEBOOK_PATHS, ids=lambda p: p.name)

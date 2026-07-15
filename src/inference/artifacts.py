@@ -27,12 +27,6 @@ def _construct_model_offline(family: str, saved_config: dict) -> nn.Module:
     config (the original, unmutated ``saved_config``) still faithfully
     records what the checkpoint was actually *trained* with.
     """
-    if family == "pretrained_volo":
-        from src.models.pretrained_volo import build_pretrained_volo_model
-
-        construction_config = copy.deepcopy(saved_config)
-        construction_config["model"]["volo"]["pretrained"] = False
-        return build_pretrained_volo_model(construction_config)
     if family == "pretrained_resnet":
         from src.models.pretrained_resnet import build_pretrained_resnet_model
 
@@ -41,9 +35,7 @@ def _construct_model_offline(family: str, saved_config: dict) -> nn.Module:
         return build_pretrained_resnet_model(construction_config)
     if family == "core":
         return MultiTaskFaceModel(saved_config)
-    raise ValueError(
-        f"Unknown model.family '{family}', expected 'core', 'pretrained_volo', or 'pretrained_resnet'"
-    )
+    raise ValueError(f"Unknown model.family '{family}', expected 'core' or 'pretrained_resnet'")
 
 
 def load_model_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> tuple[nn.Module, dict, dict]:
@@ -52,11 +44,8 @@ def load_model_checkpoint(checkpoint_path: str | Path, device: str = "cpu") -> t
     ``config["model"]["family"]`` selects the model class to reconstruct:
     ``"core"`` (the default -- every existing checkpoint/config lacks this
     key, so it always resolves to the original ``MultiTaskFaceModel`` path
-    unchanged), ``"pretrained_volo"`` (the supplementary transfer-learning
-    extension's ``PretrainedVOLOFaceOnlyMultiTask``, see
-    ``src/models/pretrained_volo.py``), or ``"pretrained_resnet"`` (the
-    pretrained-torchvision-ResNet bridge baseline, see
-    ``src/models/pretrained_resnet.py``).
+    unchanged) or ``"pretrained_resnet"`` (the pretrained-torchvision-ResNet
+    bridge baseline, see ``src/models/pretrained_resnet.py``).
 
     Reconstruction never re-downloads pretrained weights (see
     :func:`_construct_model_offline`) -- the returned ``config`` is the

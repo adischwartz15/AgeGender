@@ -64,8 +64,8 @@ def main() -> int:
         return 1
     df = pd.read_csv(splits_path)
     # Model-aware preprocessing (see src/data/transforms.py::resolve_eval_transform)
-    # -- a VOLO/pretrained-ResNet checkpoint's own resolved transform, never
-    # this project's 128px/IMAGENET-constant default for such a model.
+    # -- a pretrained-ResNet checkpoint's own resolved transform, never this
+    # project's 128px/IMAGENET-constant default for such a model.
     train_dataset = FaceMultiTaskDataset(df[df["split"] == "train"], resolve_eval_transform(model, config))
 
     age_embeds, gender_embeds, ages, age_mask, genders, gender_mask = _extract_embeddings(model, train_dataset, device)

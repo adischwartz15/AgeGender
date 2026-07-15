@@ -3,9 +3,7 @@
 local-checkpoint loading (no pretrained download), and conformal artifact
 provenance/rejection (src/evaluation/calibration.py).
 
-CPU-only, synthetic where possible. VOLO-specific tests are skipped when
-timm is not installed (pytest.importorskip), and use pretrained=False so
-they never touch the network.
+CPU-only, synthetic where possible.
 """
 
 from __future__ import annotations
@@ -44,9 +42,10 @@ def test_crop_pct_1_0_is_unchanged_behaviour():
 
 
 def test_crop_pct_below_1_resizes_larger_before_cropping():
-    """With crop_pct=0.96 (VOLO-D1's real value), the intermediate resize
-    target is round(size / crop_pct) > size -- a larger field of view is
-    kept before the final crop than with crop_pct=1.0."""
+    """With crop_pct=0.96 (a real value from a pretrained backbone's own
+    preprocessing config), the intermediate resize target is
+    round(size / crop_pct) > size -- a larger field of view is kept before
+    the final crop than with crop_pct=1.0."""
     img = Image.new("RGB", (300, 300), color=(50, 60, 70))
     out = resize_and_center_crop(img, 224, crop_pct=0.96)
     assert out.size == (224, 224)  # final crop size is always `size`
@@ -142,45 +141,6 @@ def test_construct_model_offline_rejects_unknown_family():
         _construct_model_offline("not_a_real_family", {"model": {}})
 
 
-@pytest.mark.parametrize("has_timm", [True])
-def test_volo_offline_reconstruction_never_requests_pretrained_weights(monkeypatch, tmp_path, has_timm):
-    pytest.importorskip("timm")
-    import timm
-
-    from src.inference.artifacts import _construct_model_offline
-
-    saved_config = {
-        "model": {
-            "family": "pretrained_volo",
-            "volo": {"model_id": "volo_d1_224", "pretrained": True, "pretrained_source": "imagenet1k"},
-            "adapters": {"enabled": True, "bottleneck_ratio": 4, "dropout": 0.1},
-            "age_head": {"hidden_dim": 16, "age_min": 0, "age_max": 120},
-            "gender_head": {"hidden_dim": 16, "num_classes": 2},
-            "loss_balancing": {"mode": "fixed"},
-        }
-    }
-    calls = []
-    real_create_model = timm.create_model
-
-    def _spy_create_model(model_id, pretrained=False, **kwargs):
-        calls.append(pretrained)
-        # Force pretrained=False in the actual call regardless of what was
-        # requested, so this test never touches the network even if the
-        # offline-load fix regressed.
-        return real_create_model(model_id, pretrained=False, **kwargs)
-
-    monkeypatch.setattr(timm, "create_model", _spy_create_model)
-
-    import copy as _copy
-
-    before = _copy.deepcopy(saved_config)
-    model = _construct_model_offline("pretrained_volo", saved_config)
-
-    assert calls == [False]  # never requested pretrained=True, even though saved_config says pretrained: true
-    assert saved_config == before  # the ORIGINAL saved config is untouched
-    assert model is not None
-
-
 def test_load_model_checkpoint_reload_matches_original_outputs(tmp_path):
     """End-to-end (core family, no timm needed): save a checkpoint, reload
     it via load_model_checkpoint, confirm outputs match and the returned
@@ -230,10 +190,10 @@ def test_preprocessing_fingerprint_deterministic():
 def test_validate_calibration_artifact_rejects_model_id_mismatch(tmp_path):
     artifact = fit_and_save_calibration(
         np.array([10.0, 20.0, 30.0]), np.array([5.0, 15.0, 25.0]), np.array([15.0, 25.0, 35.0]),
-        alpha=0.1, output_dir=tmp_path, model_id="volo_d1_224", pretrained_source="imagenet1k",
+        alpha=0.1, output_dir=tmp_path, model_id="resnet18_224", pretrained_source="imagenet1k",
         preprocessing_fingerprint="fp-abc",
     )
-    validate_calibration_artifact(artifact, model_id="volo_d1_224", preprocessing_fingerprint="fp-abc")  # OK
+    validate_calibration_artifact(artifact, model_id="resnet18_224", preprocessing_fingerprint="fp-abc")  # OK
 
     with pytest.raises(CalibrationMismatchError):
         validate_calibration_artifact(artifact, model_id="resnet18")
@@ -247,4 +207,4 @@ def test_validate_calibration_artifact_skips_unrecorded_fields():
     existed (both None) must not be rejected just because the caller now
     supplies those fields -- there's nothing on disk to compare against."""
     old_artifact = {"method": "split_conformal_cqr", "offset": 1.0, "model_id": None, "preprocessing_fingerprint": None}
-    validate_calibration_artifact(old_artifact, model_id="volo_d1_224", preprocessing_fingerprint="fp-xyz")
+    validate_calibration_artifact(old_artifact, model_id="resnet18_224", preprocessing_fingerprint="fp-xyz")

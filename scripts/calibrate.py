@@ -86,7 +86,7 @@ def calibrate_checkpoint(
         return None
     df = pd.read_csv(splits_path)
 
-    # Model-aware preprocessing: a VOLO/pretrained-ResNet checkpoint's own
+    # Model-aware preprocessing: a pretrained-ResNet checkpoint's own
     # resolved transform (input size, mean/std, interpolation, crop_pct),
     # never this project's 128px/IMAGENET-constant default for such a model
     # -- see src/data/transforms.py::resolve_eval_transform.

@@ -66,11 +66,10 @@ def _build_optimizer(
 def _build_scheduler(
     optimizer: torch.optim.Optimizer, total_epochs: int, warmup_epochs: int, warmup_start_factor: float = 0.1,
 ):
-    """Linear warmup then cosine annealing (see
-    :func:`src.training.optim.build_warmup_cosine_scheduler`). Thin wrapper
-    kept for the import in ``src/training/transfer_trainer.py``; the real
-    warmup fix (an explicit ``warmup_start_factor`` instead of the old
-    ``1.0 / warmup_epochs``) lives in the shared utility."""
+    """Linear warmup then cosine annealing. Thin wrapper around
+    :func:`src.training.optim.build_warmup_cosine_scheduler`, where the
+    real warmup fix (an explicit ``warmup_start_factor`` instead of the old
+    ``1.0 / warmup_epochs``) lives."""
     return build_warmup_cosine_scheduler(optimizer, total_epochs, warmup_epochs, warmup_start_factor)
 
 
@@ -228,6 +227,10 @@ class Trainer:
 
         loss_cfg = self.config["model"]["loss_balancing"]
         mode, fixed = resolve_loss_balancing(loss_cfg, current_epoch)
+        learned_uncertainty_cfg = loss_cfg.get("learned_uncertainty", {})
+        gender_loss_scale = learned_uncertainty_cfg.get("gender_loss_scale", 1.0)
+        log_var_clamp_min = learned_uncertainty_cfg.get("log_var_clamp_min")
+        log_var_clamp_max = learned_uncertainty_cfg.get("log_var_clamp_max")
         max_batches = self.max_train_batches if is_train else self.max_val_batches
 
         for batch_idx, batch in enumerate(loader):
@@ -252,6 +255,9 @@ class Trainer:
                         fixed_gender_weight=fixed.get("gender_weight", 1.0),
                         log_var_age=self.model.log_var_age, log_var_gender=self.model.log_var_gender,
                         gender_class_weights=self.gender_class_weights,
+                        gender_loss_scale=gender_loss_scale,
+                        log_var_clamp_min=log_var_clamp_min,
+                        log_var_clamp_max=log_var_clamp_max,
                     )
 
             if is_train:
@@ -556,13 +562,14 @@ class Trainer:
         """Atomically overwrite a single ``*_last.pt`` after every epoch --
         a live progress/safety artifact (the most recent model state), kept
         deliberately separate from the per-metric ``_best_*.pt`` files this
-        class already writes. Unlike the transfer-learning trainer's
-        ``last.pt``, this does not carry optimizer/scheduler state and is
-        not wired into a resume path -- the core Trainer has no
-        epoch-level resume today (see docs/notebooks.md "Stage-level
-        restart-safety"); this exists so a notebook status scan always has
-        *some* current-state checkpoint to point at while a run is in
-        progress, even before the first metric improvement is seen."""
+        class already writes. This does not carry optimizer/scheduler state
+        and is not wired into a resume path -- the core Trainer has no
+        epoch-level resume today (restart-safety is at the stage level: a
+        notebook re-run skips an experiment/seed whose checkpoint already
+        exists, see docs/execution_modes.md "Resume safety"); this exists
+        so a notebook status scan always has *some* current-state
+        checkpoint to point at while a run is in progress, even before the
+        first metric improvement is seen."""
         payload = {
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": None,

@@ -40,12 +40,6 @@
 - "Model attention visualization" — NOT "explanation" (for Grad-CAM)
 - "Raw" vs. "calibrated" — always specify which
 
-## Top 5 Gotcha Questions
-1. **"Why not just use torchvision ResNet?"** → Demonstrates understanding; no external pretrained weights.
-2. **"How do you prevent data leakage?"** → 4-way split, SHA-256 provenance, calibration ≠ validation.
-3. **"Is sharing always better?"** → Parameter reduction ≠ performance improvement. Cross-experiment eval needed.
-4. **"Are your results statistically significant?"** → One seed. 3-seed protocol exists but not committed. Be honest.
-5. **"What about bias?"** → Binary labels, limited demographics, no fairness audit. This is a limitation, not a claim.
 
 ## Quick File Reference
 | Purpose | File |
@@ -59,6 +53,5 @@
 | Training loop | `src/training/trainer.py` |
 | Calibration | `src/evaluation/calibration.py` |
 | Metrics | `src/evaluation/metrics.py` |
-| Face detection | `src/inference/face_detection.py` |
 | Results | `docs/results.md` |
 | Experiment plan | `docs/experiment_plan.md` |

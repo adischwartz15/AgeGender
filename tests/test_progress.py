@@ -1,5 +1,5 @@
 """Tests for src/training/progress.py -- the shared live-progress formatting
-used by both Trainer and TransferTrainer."""
+used by the trainer."""
 
 from __future__ import annotations
 
@@ -128,7 +128,7 @@ def test_format_epoch_report_renders_missing_metrics_as_na_not_fabricated():
 
 def test_format_multi_seed_preflight_lists_every_category():
     text = format_multi_seed_preflight(
-        "volo_d1_face_only_pretrained",
+        "exp_d_shared_adapters_learned_balance",
         requested_seeds=[42, 123, 2026], completed_seeds=[42],
         incomplete_resumable_seeds=[123], missing_seeds=[2026], will_run_now_seeds=[123, 2026],
     )
@@ -141,7 +141,7 @@ def test_format_multi_seed_preflight_lists_every_category():
 
 def test_format_resume_announcement_includes_every_required_field():
     text = format_resume_announcement(
-        "volo_d1_face_only_pretrained", 123, "local", "Stage 2: fine-tune", 5, 340, 0.87,
+        "exp_d_shared_adapters_learned_balance", 123, "local", "Stage 2: fine-tune", 5, 340, 0.87,
         "checkpoints/.../last.pt", "abc123", "def456",
     )
     for expected in (

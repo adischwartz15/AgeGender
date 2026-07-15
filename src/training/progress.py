@@ -1,10 +1,7 @@
-"""Shared, human-readable live-progress formatting for both trainers.
+"""Shared, human-readable live-progress formatting for the trainer.
 
 Pure string-building (no I/O beyond :func:`emit`'s ``print``) so every piece
-is directly unit-testable without running real training. Centralizing this
-here means ``src/training/trainer.py`` and ``src/training/transfer_trainer.py``
-report the same fields in the same shape, instead of two independently
-drifting formats.
+is directly unit-testable without running real training.
 
 Why this module exists: a Colab/Kaggle cell only shows what actually reaches
 stdout, flushed, as it happens -- ``logger.info(...)`` alone is not enough
@@ -76,8 +73,8 @@ def format_lr_groups(named_lrs: dict[str, float | None]) -> str:
 def describe_trainable_backbone_parts(model) -> str:
     """Generic (model-agnostic) summary of which immediate backbone
     submodules currently have trainable parameters -- works for any model
-    exposing a ``.backbone`` ``nn.Module`` attribute (VOLO via timm,
-    ResNet-18/50 via torchvision) without needing model-specific code."""
+    exposing a ``.backbone`` ``nn.Module`` attribute (e.g. ResNet-18/50 via
+    torchvision) without needing model-specific code."""
     backbone = getattr(model, "backbone", None)
     if backbone is None:
         return "n/a (model has no .backbone attribute)"

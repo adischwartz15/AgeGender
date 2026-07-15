@@ -3,13 +3,13 @@
 Kaggle notebook outputs already persist under ``/kaggle/working`` (saved as
 a notebook-version's output dataset) -- this module exists only for the
 *additional*, opt-in case where a user wants a second, off-Kaggle copy of
-the transfer-learning artifacts. It is never required for the Kaggle
-notebook's own resume/persistence behavior (see
+the run's artifacts. It is never required for the Kaggle notebook's own
+resume/persistence behavior (see
 ``src/training/persistent_artifacts.py::PersistentArtifactManager``, which
 works entirely off ``/kaggle/working`` and an optional attached
 prior-output dataset).
 
-Security contract (see ``docs/transfer_learning.md`` "Secret handling"):
+Security contract:
 
 - Credentials are read **only** from Kaggle Secrets
   (``GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON``, ``GOOGLE_DRIVE_FOLDER_ID``) via
@@ -129,8 +129,8 @@ def upload_file(local_path: str | Path, drive_filename: str | None = None) -> bo
     except ImportError:
         logger.warning(
             "Google Drive backup is enabled but the optional 'google-api-python-client'/"
-            "'google-auth' packages are not installed -- skipping Drive upload. See "
-            "docs/transfer_learning.md 'Secret handling' for the install command.",
+            "'google-auth' packages are not installed -- skipping Drive upload. Install "
+            "them with 'pip install -r requirements-kaggle-drive.txt'.",
         )
         return False
 
@@ -171,13 +171,12 @@ def download_file(local_path: str | Path, drive_filename: str | None = None) -> 
     ``local_path``. Returns ``True`` on success, ``False`` on any failure --
     same fail-soft contract as :func:`upload_file`.
 
-    Scope note: this restores one named file (e.g. the lightweight
-    ``transfer_learning_summary.zip``), not an entire seed's checkpoint
-    tree -- the documented, primary Kaggle restore path for full
-    checkpoints is attaching a previous run's notebook output as an input
-    dataset (a plain read-only mounted directory,
-    ``PersistentArtifactManager.restore_seed()`` handles that natively). See
-    ``docs/transfer_learning.md`` "Kaggle recovery".
+    Scope note: this restores one named file (e.g. a lightweight summary
+    archive), not an entire seed's checkpoint tree -- the primary Kaggle
+    restore path for full checkpoints is attaching a previous run's
+    notebook output as an input dataset (a plain read-only mounted
+    directory, ``PersistentArtifactManager.restore_seed()`` handles that
+    natively).
     """
     local_path = Path(local_path)
     service_account_json = _read_kaggle_secret(SECRET_SERVICE_ACCOUNT_JSON)

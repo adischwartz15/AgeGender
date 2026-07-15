@@ -60,6 +60,17 @@ model:
       # meaningful. 0 disables warmup (learned weighting from epoch 1).
       # Only relevant when loss_balancing.mode == learned_uncertainty.
       warmup_epochs: 3
+      # Diagnosed on a real exp_d run: the learned weights converge close to
+      # log_var_task ~= log(loss_task), so gender (cross-entropy, "nats"
+      # scale, ~0.21 at convergence) ends up with a much higher weight than
+      # age (pinball, "years" scale, ~1.79 at convergence) purely from this
+      # unit mismatch, not real task difficulty (observed effective weights:
+      # age~=0.57, gender~=5.78, a ~10x ratio). Both knobs below default to a
+      # no-op -- exp_d and every other existing config is unaffected unless
+      # an experiment explicitly overrides them.
+      gender_loss_scale: 1.0        # multiplies gender_loss only inside the weighting term (never in reported metrics)
+      log_var_clamp_min: null       # e.g. -1.0 to bound how low log_var_age/log_var_gender can go
+      log_var_clamp_max: null       # e.g. 1.0 to bound how high log_var_age/log_var_gender can go
 
 gradcam:
   target_layer: layer4            # last residual stage of the backbone

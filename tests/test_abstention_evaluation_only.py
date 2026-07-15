@@ -117,13 +117,11 @@ def test_never_calls_any_training_entrypoint(monkeypatch):
     runtime (not just by signature inspection) that no training path is on
     the call graph."""
     import src.training.trainer as trainer_module
-    import src.training.transfer_trainer as transfer_trainer_module
 
     def _boom(*a, **kw):
         raise AssertionError("must never train")
 
     monkeypatch.setattr(trainer_module.Trainer, "train", _boom)
-    monkeypatch.setattr(transfer_trainer_module.TransferTrainer, "train", _boom)
 
     y_true, probs = _synthetic_probs_and_labels()
     gender_selective_prediction_report(y_true, probs, confidence_threshold=0.8)

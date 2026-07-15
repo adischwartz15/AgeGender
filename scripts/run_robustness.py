@@ -97,7 +97,7 @@ def main() -> int:
     # (see src/data/transforms.py::resolve_eval_transform), so the "clean"
     # robustness baseline row is directly comparable to the ordinary test
     # metrics for this same checkpoint, and never silently wrong for a
-    # VOLO/pretrained-ResNet checkpoint.
+    # pretrained-ResNet checkpoint.
     transform = resolve_eval_transform(model, config)
     confidence_threshold = config["model"]["gender_head"].get("confidence_threshold", 0.80)
     seed = robustness_cfg.get("seed", 42)

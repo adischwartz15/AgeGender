@@ -85,8 +85,7 @@ def lock_split_env(tmp_path, synthetic_image_dir, monkeypatch):
     (see src/utils/config.py::load_config), and this repo's own .env sets
     DATA_DIR, which would otherwise silently re-derive paths.splits_dir out
     from under a plain YAML override -- --set is the only override tier
-    that actually wins here, exactly the same reason
-    scripts/run_transfer_learning.py re-asserts its own paths block."""
+    that actually wins here."""
     image_dir, _ = synthetic_image_dir
     splits_dir = tmp_path / "splits"
     argv = [

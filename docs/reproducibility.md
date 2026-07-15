@@ -50,7 +50,25 @@ Every saved checkpoint embeds a full copy of the config that produced it.
 
 ## Running on Kaggle or Google Colab
 
-See `docs/notebooks.md` for the full guide. In short: two ready-to-run
-notebooks cover the entire pipeline — setup, data prep, tests, training,
-calibration, evaluation, optional robustness/Grad-CAM/k-NN, multi-seed
-runs, and a final report.
+Two ready-to-run notebooks, one per platform, each covering the entire
+pipeline end to end in a single pass: setup, data prep, tests, the full
+architecture ablation suite (Experiments 0/0b/0c/A/B/C/D), Experiment E
+(parametric vs. k-NN), optional non-parametric baselines/robustness/
+Grad-CAM/multi-seed runs, a detailed results report, and a final summary.
+See `docs/execution_modes.md` for every configuration flag.
+
+- `notebooks/train_evaluate_colab.ipynb` -- Google Colab. Syncs the run
+  directory to Google Drive after every phase, and restores from Drive
+  when resuming a previous run in a fresh session.
+- `notebooks/train_evaluate_kaggle.ipynb` -- Kaggle Notebooks. Uses an
+  attached Kaggle input dataset (or the Kaggle API, pre-filled with the
+  standard `jangedoo/utkface-new` dataset slug), never mounts Google
+  Drive, and produces a downloadable zip archive under Kaggle's Output
+  tab. Resuming across a session restart requires attaching the previous
+  session's own output as an input dataset (see `PREVIOUS_RUN_KAGGLE_INPUT_DIR`
+  in `docs/execution_modes.md`).
+
+Both notebooks are restart-safe: every stage (train / calibrate / build
+k-NN index / evaluate) is checked and skipped independently if its
+artifact already exists, so an interruption never redoes already-complete
+work -- see `docs/execution_modes.md`'s "Resume safety" section.

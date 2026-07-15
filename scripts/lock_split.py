@@ -81,8 +81,8 @@ def existing_split_is_valid(splits_dir: Path) -> bool:
     """A locked split is valid only if BOTH the split CSV and its manifest
     exist AND the manifest's recorded split_csv_sha256 matches the CSV
     file's actual current content -- never inferred from file existence
-    alone (the same principle the transfer-learning persistence layer uses
-    for seed completion, see src/training/persistent_artifacts.py)."""
+    alone (the same principle src/training/persistent_artifacts.py uses for
+    seed completion)."""
     split_path = splits_dir / SPLIT_FILENAME
     manifest_path = splits_dir / MANIFEST_FILENAME
     if not split_path.exists() or not manifest_path.exists():

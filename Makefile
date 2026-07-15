@@ -5,7 +5,7 @@
 PYTHON ?= python
 CHECKPOINT ?= checkpoints/multitask_best_balanced_score.pt
 EXPERIMENT ?= exp_d_shared_adapters_learned_balance
-SEEDS ?= 42,123,2026
+SEEDS ?= 42,123,1729
 ARGS ?=
 
 install:

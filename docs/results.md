@@ -20,11 +20,10 @@ comparison.*
 
 ## Parametric Model vs. k-NN Baseline (Experiment E)
 
-Same trained checkpoint (shared backbone + adapters, Experiment D),
-compared two ways: its own quantile/classification heads ("Parametric")
-versus a k-NN search (k=15) over that same checkpoint's embeddings
-("k-NN") -- isolating how much of the performance comes from the learned
-heads themselves, not just the learned representation.
+Same trained checkpoint (Experiment D), compared two ways: its own
+prediction heads ("Parametric") vs. a k-NN search (k=15) over that same
+checkpoint's learned embeddings ("k-NN"). This shows how much of the
+performance comes from the trained heads, not just the learned features.
 
 | Metric | Parametric | k-NN (k=15) | Edge |
 |---|---:|---:|---|
@@ -36,23 +35,20 @@ heads themselves, not just the learned representation.
 | Abstention rate (lower is more decisive) | 0.192 | **0.179** | k-NN, by 1.3 pts |
 | Latency per image | **1.8 ms** | 2.0 ms | Parametric, ~10% faster |
 
-**Bottom line:** the two methods are close on gender-label accuracy, but
-they trade off in opposite directions on age intervals. The parametric
-model's intervals are far tighter (16.79 vs. 26.88 average width) but
-under-cover their nominal target; the k-NN intervals are wider but land
-closer to the target coverage. Wider intervals reaching higher coverage is
-the expected signature of a more conservative, not more precise, method --
-not evidence that k-NN "wins" outright.
+**Bottom line:** the two methods score about the same on gender-label
+accuracy. For age, they trade off in opposite directions: the parametric
+model gives much tighter intervals (16.79 vs. 26.88 average width) but
+hits its coverage target less often; k-NN's intervals are wider but land
+closer to the target. Wider-but-more-accurate coverage is what a more
+cautious method looks like -- it doesn't mean k-NN actually "wins."
 
-Two caveats on reading this table:
-- **Neither row is calibrated.** The q10-q90 range is, by construction, a
-  nominal 80% interval; 0.79 and 0.91 above are raw empirical coverage
-  *before* conformal calibration is applied to either method, not a
-  guarantee.
-- **Accuracy here is selective accuracy** -- computed only over
-  predictions the gender-label head didn't abstain on (see
-  `docs/evaluation.md` for how this differs from coverage and effective
-  accuracy).
+Two things to keep in mind:
+- **Neither row is calibrated.** The q10-q90 range is defined to cover
+  80% of cases; 0.79 and 0.91 above are the raw, uncalibrated coverage --
+  not a guarantee.
+- **"Accuracy" here means selective accuracy** -- only counted on cases
+  the gender head actually answered (see `docs/evaluation.md` for how
+  this differs from coverage and effective accuracy).
 
 ## Gradient interference and representation similarity
 

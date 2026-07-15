@@ -156,7 +156,7 @@ def test_scheduler_handles_zero_warmup_epochs():
 
 
 def test_scheduler_handles_single_epoch_total():
-    """Regression guard: a 1-epoch run (e.g. RUN_PROFILE='smoke') must not
+    """Regression guard: a 1-epoch run (e.g. SMOKE_TEST=True) must not
     raise even though there's no room for both warmup and decay."""
     model_param = torch.nn.Parameter(torch.zeros(1))
     optimizer = torch.optim.AdamW([model_param], lr=1.0)
@@ -196,3 +196,73 @@ def test_trainer_runs_end_to_end_with_differential_lr_and_loss_balancing_warmup(
     assert history["log_var_gender"][0] == 0.0
     assert history["effective_age_weight"][0] == 1.0
     assert history["effective_gender_weight"][0] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# Learned-uncertainty correction knobs: gender_loss_scale, log_var_clamp_*
+# (added after diagnosing that gender's cross-entropy loss lives on a much
+# smaller numeric scale than age's pinball loss, biasing the learned weights
+# toward gender regardless of real task difficulty -- see
+# src/losses/multitask_loss.py's module docstring)
+# ---------------------------------------------------------------------------
+
+def test_trainer_respects_log_var_clamp_bounds(tmp_path, synthetic_metadata_df, tiny_config):
+    """A tight log_var_clamp must keep every epoch's reported log_var inside
+    bounds, end to end through the real Trainer (not just the pure loss
+    function in tests/test_losses.py)."""
+    config = copy.deepcopy(tiny_config)
+    config["training"]["warm_up_from_scratch"]["epochs"] = 3
+    config["model"]["loss_balancing"]["mode"] = "learned_uncertainty"
+    config["model"]["loss_balancing"]["learned_uncertainty"]["warmup_epochs"] = 0
+    config["model"]["loss_balancing"]["learned_uncertainty"]["log_var_clamp_min"] = -0.2
+    config["model"]["loss_balancing"]["learned_uncertainty"]["log_var_clamp_max"] = 0.2
+
+    train_dataset, val_dataset = _build_datasets(synthetic_metadata_df, config, seed=3)
+    model = build_multitask_model(config)
+    trainer = Trainer(
+        model, config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="clamp_test", output_dir=tmp_path / "output",
+    )
+    result = trainer.train()
+
+    history = result["history"]
+    assert all(-0.2 - 1e-6 <= v <= 0.2 + 1e-6 for v in history["log_var_age"])
+    assert all(-0.2 - 1e-6 <= v <= 0.2 + 1e-6 for v in history["log_var_gender"])
+
+
+def test_trainer_passes_gender_loss_scale_from_config_to_loss_function(
+    monkeypatch, tmp_path, synthetic_metadata_df, tiny_config,
+):
+    """The trainer must read gender_loss_scale out of
+    model.loss_balancing.learned_uncertainty and forward it to every
+    compute_multitask_loss call -- checked deterministically by intercepting
+    the real call, rather than by asserting on where log_var ends up after
+    a full (statistically noisy, on this tiny synthetic setup) training run.
+    """
+    import src.training.trainer as trainer_module
+
+    config = copy.deepcopy(tiny_config)
+    config["training"]["warm_up_from_scratch"]["epochs"] = 1
+    config["model"]["loss_balancing"]["mode"] = "learned_uncertainty"
+    config["model"]["loss_balancing"]["learned_uncertainty"]["warmup_epochs"] = 0
+    config["model"]["loss_balancing"]["learned_uncertainty"]["gender_loss_scale"] = 8.5
+
+    train_dataset, val_dataset = _build_datasets(synthetic_metadata_df, config, seed=1)
+    model = build_multitask_model(config)
+    trainer = Trainer(
+        model, config, train_dataset, val_dataset, device="cpu",
+        checkpoint_dir=tmp_path / "checkpoints", experiment_name="scale_wiring_test", output_dir=tmp_path / "output",
+    )
+
+    real_compute_multitask_loss = trainer_module.compute_multitask_loss
+    seen_scales = []
+
+    def _spy(*args, **kwargs):
+        seen_scales.append(kwargs.get("gender_loss_scale"))
+        return real_compute_multitask_loss(*args, **kwargs)
+
+    monkeypatch.setattr(trainer_module, "compute_multitask_loss", _spy)
+    trainer.train()
+
+    assert seen_scales  # at least one batch ran
+    assert all(scale == 8.5 for scale in seen_scales)

@@ -1,10 +1,9 @@
-# Optional extra for the supplementary ImageNet-pretrained transfer-learning
-# experiments only (src/models/pretrained_volo.py, src/models/pretrained_resnet.py,
-# scripts/run_transfer_learning.py). Not required to install, import, or run
-# any core (from-scratch) experiment -- see README.md "Core vs. supplementary"
-# section.
+# Optional extra for the non-parametric "frozen_backbone" baseline
+# (src/models/pretrained_resnet.py, src/evaluation/nonparametric/features.py),
+# which uses a frozen ImageNet-pretrained torchvision ResNet as a feature
+# extractor. Not required to install, import, or run any core (from-scratch)
+# experiment.
 #
 #     pip install -r requirements.txt
-#     pip install -r requirements-transfer.txt   # only if you want to run the VOLO or pretrained-ResNet extensions
-timm>=1.0,<2.0
+#     pip install -r requirements-transfer.txt   # only if you want the frozen_backbone baseline
 torchvision>=0.17,<1.0
